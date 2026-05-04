@@ -21,12 +21,17 @@ binding = "SANDBOX"
 [[d1_databases]]
 binding = "DB"
 database_name = "commute-telemetry"
-database_id = ""
+database_id = "5f7633c1-0ea2-4bdf-8a23-76c5ab15bb3a"
 
 # KV for OAuth state and session caching
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = ""
+id = "4c23fe928c814a01b0384b58330eff3f"
+
+# Durable Objects migration
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDO"]
 
 [vars]
 # Set via wrangler secret put:

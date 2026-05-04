@@ -2,6 +2,7 @@ name = "kimiflare-commute"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
 
 # Durable Objects
 [[durable_objects.bindings]]
@@ -27,6 +28,11 @@ database_id = "5f7633c1-0ea2-4bdf-8a23-76c5ab15bb3a"
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "4c23fe928c814a01b0384b58330eff3f"
+
+# Custom domain
+[[routes]]
+pattern = "commute.kimiflare.com"
+custom_domain = true
 
 # Durable Objects migration
 [[migrations]]

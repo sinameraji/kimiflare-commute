@@ -6,6 +6,7 @@ dist/
 .env.*
 !.env.example
 .DS_Store
+.wrangler/
 
 # user data that must never leak to git
 ~

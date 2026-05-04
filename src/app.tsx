@@ -26,6 +26,11 @@ import { LspManager } from "./lsp/manager.js";
 import { makeLspTools } from "./tools/lsp.js";
 import { sanitizeString } from "./agent/messages.js";
 import type { ChatMessage, ContentPart, Usage } from "./agent/messages.js";
+import { startRemoteSession, streamRemoteProgress } from "./remote/worker-client.js";
+import { saveRemoteSession, type RemoteSession } from "./remote/session-store.js";
+import { deployForTui } from "./remote/tui-deploy.js";
+import { authGitHubForTui } from "./remote/tui-auth.js";
+import { RemoteDashboard, RemoteSessionDetail } from "./ui/remote-dashboard.js";
 import { KimiApiError } from "./util/errors.js";
 import { ChatView, type ChatEvent } from "./ui/chat.js";
 import { StatusBar } from "./ui/status.js";
@@ -303,6 +308,23 @@ interface Cfg {
   costAttribution?: boolean;
   filePicker?: boolean;
   theme?: string;
+  multiAgent?: boolean;
+  agentModels?: Record<string, string>;
+  agentReasoningEffort?: Record<string, ReasoningEffort>;
+  orchestratorModel?: string;
+  autoSwitch?: boolean;
+  autoSwitchConfirm?: boolean;
+  maxTurnsPerAgent?: number;
+  customAgents?: { name: string; tools: string[]; model?: string; systemPrompt?: string; reasoningEffort?: ReasoningEffort }[];
+  remoteWorkerUrl?: string;
+  remoteEnabled?: boolean;
+  remoteAuthSecret?: string;
+  remoteTtlMinutes?: number;
+  remoteMaxInputTokens?: number;
+  githubOAuthToken?: string;
+  githubRefreshToken?: string;
+  githubTokenExpiry?: number;
+  githubRepo?: string;
 }
 
 function gatewayFromConfig(cfg: Cfg): AiGatewayOptions | undefined {
@@ -435,6 +457,12 @@ const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
   high: "high — deepest reasoning; slowest. Best for complex debugging, architecture, multi-file refactors.",
 };
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 function App({
   initialCfg,
   initialUpdateResult,
@@ -485,6 +513,8 @@ function App({
   const [commandToDelete, setCommandToDelete] = useState<CustomCommand | null>(null);
   const [showCommandList, setShowCommandList] = useState(false);
   const [showLspWizard, setShowLspWizard] = useState(false);
+  const [showRemoteDashboard, setShowRemoteDashboard] = useState(false);
+  const [selectedRemoteSession, setSelectedRemoteSession] = useState<RemoteSession | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [tasksStartedAt, setTasksStartedAt] = useState<number | null>(null);
   const [tasksStartTokens, setTasksStartTokens] = useState<number>(0);
@@ -2201,6 +2231,191 @@ function App({
         ]);
         return true;
       }
+      if (c === "/remote") {
+        if (arg === "status" || arg === "cancel") {
+          setEvents((e) => [
+            ...e,
+            { kind: "info", key: mkKey(), text: `Use \`kimiflare remote ${arg}\` from your shell.` },
+          ]);
+          return true;
+        }
+
+        const prompt = rest.join(" ").trim();
+        if (!prompt) {
+          // Show dashboard when /remote is used without a prompt
+          setShowRemoteDashboard(true);
+          return true;
+        }
+
+        const repo = detectGitHubRepo(cfg?.githubRepo);
+        if (!repo) {
+          setEvents((e) => [
+            ...e,
+            { kind: "info", key: mkKey(), text: "Could not detect GitHub repo. Run from a repo with a GitHub remote, or set githubRepo in config." },
+          ]);
+          return true;
+        }
+
+        // Run the full remote flow: deploy → auth → session
+        (async () => {
+          // -- Auto-deploy if needed --
+          if (!cfg?.remoteWorkerUrl) {
+            setEvents((e) => [
+              ...e,
+              { kind: "info", key: mkKey(), text: "Remote infrastructure not deployed yet. Setting up now (~2 min)..." },
+            ]);
+
+            try {
+              for await (const step of deployForTui()) {
+                setEvents((e) => [
+                  ...e,
+                  { kind: step.error ? "error" : "info", key: mkKey(), text: step.message },
+                ]);
+                if (step.done) break;
+              }
+            } catch {
+              setEvents((e) => [
+                ...e,
+                { kind: "error", key: mkKey(), text: "Deploy failed. Fix the issue above and try /remote again." },
+              ]);
+              return;
+            }
+
+            // Reload config after deploy
+            const { loadConfig: reloadConfig } = await import("./config.js");
+            const newCfg = await reloadConfig();
+            if (newCfg) setCfg(newCfg);
+          }
+
+          const currentCfg = cfg ?? (await loadConfig());
+          if (!currentCfg?.remoteWorkerUrl) {
+            setEvents((e) => [
+              ...e,
+              { kind: "error", key: mkKey(), text: "Deploy seemed to succeed but config wasn't saved. Try again." },
+            ]);
+            return;
+          }
+
+          // -- Auto-auth with GitHub if needed --
+          if (!currentCfg.githubOAuthToken) {
+            setEvents((e) => [
+              ...e,
+              { kind: "info", key: mkKey(), text: "GitHub not authenticated. Starting OAuth device flow..." },
+            ]);
+
+            try {
+              for await (const step of authGitHubForTui()) {
+                setEvents((e) => [
+                  ...e,
+                  { kind: step.error ? "error" : "info", key: mkKey(), text: step.message },
+                ]);
+                if (step.done) break;
+              }
+            } catch {
+              setEvents((e) => [
+                ...e,
+                { kind: "error", key: mkKey(), text: "GitHub auth failed. Try `kimiflare auth github` from shell." },
+              ]);
+              return;
+            }
+
+            // Reload config after auth
+            const { loadConfig: reloadConfig } = await import("./config.js");
+            const newCfg = await reloadConfig();
+            if (newCfg) setCfg(newCfg);
+          }
+
+          const finalCfg = (await loadConfig()) ?? currentCfg;
+
+          // -- Start remote session --
+          const ttl = finalCfg.remoteTtlMinutes ?? 30;
+          const budget = finalCfg.remoteMaxInputTokens ?? 5_000_000;
+          setEvents((e) => [
+            ...e,
+            { kind: "info", key: mkKey(), text: `Starting remote session for ${repo.owner}/${repo.name}...` },
+            { kind: "info", key: mkKey(), text: `Budget: ${formatTokens(budget)} tokens. TTL: ${ttl} min.` },
+          ]);
+
+          try {
+            const data = await startRemoteSession({
+              prompt,
+              repo,
+              cfg: finalCfg,
+              ttlMinutes: finalCfg.remoteTtlMinutes,
+              tokensBudget: finalCfg.remoteMaxInputTokens,
+            });
+            setEvents((e) => [
+              ...e,
+              { kind: "info", key: mkKey(), text: `Session started: ${data.sessionId}` },
+            ]);
+
+            // Stream progress
+            for await (const ev of streamRemoteProgress(
+              finalCfg.remoteWorkerUrl!,
+              data.sessionId,
+              activeControllerRef.current?.signal,
+            )) {
+              const event = ev as Record<string, unknown>;
+              if (event.type === "text_delta") {
+                setEvents((e) => [
+                  ...e,
+                  { kind: "info", key: mkKey(), text: String(event.text ?? "") },
+                ]);
+              } else if (event.type === "tool_call") {
+                setEvents((e) => [
+                  ...e,
+                  { kind: "info", key: mkKey(), text: `→ ${String(event.name ?? "")}` },
+                ]);
+              } else if (event.type === "done") {
+                const prUrl = event.prUrl as string | undefined;
+                const tokensUsed = event.tokensUsed as number | undefined;
+                const tokensBudget = event.tokensBudget as number | undefined;
+                setEvents((e) => [
+                  ...e,
+                  { kind: "info", key: mkKey(), text: prUrl ? `Done — PR: ${prUrl}` : "Done" },
+                ]);
+                await saveRemoteSession({
+                  sessionId: data.sessionId,
+                  prompt,
+                  repo: `${repo.owner}/${repo.name}`,
+                  workerUrl: finalCfg.remoteWorkerUrl!,
+                  status: "done",
+                  prUrl,
+                  tokensUsed,
+                  tokensBudget,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                });
+              } else if (event.type === "error") {
+                const message = String(event.message ?? "");
+                const category = event.category as RemoteSession["errorCategory"] | undefined;
+                setEvents((e) => [
+                  ...e,
+                  { kind: "error", key: mkKey(), text: `Remote error: ${message}` },
+                ]);
+                await saveRemoteSession({
+                  sessionId: data.sessionId,
+                  prompt,
+                  repo: `${repo.owner}/${repo.name}`,
+                  workerUrl: finalCfg.remoteWorkerUrl!,
+                  status: "error",
+                  errorCategory: category ?? "unknown",
+                  errorSummary: message,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                });
+              }
+            }
+          } catch (err) {
+            setEvents((e) => [
+              ...e,
+              { kind: "error", key: mkKey(), text: `Failed: ${err instanceof Error ? err.message : String(err)}` },
+            ]);
+          }
+        })();
+
+        return true;
+      }
       if (c === "/help") {
         setShowHelpMenu(true);
         return true;
@@ -2791,6 +3006,43 @@ function App({
               setShowLspWizard(false);
             }}
           />
+        </Box>
+      </ThemeProvider>
+    );
+  }
+
+  if (showRemoteDashboard) {
+    return (
+      <ThemeProvider theme={theme}>
+        <Box flexDirection="column">
+          {selectedRemoteSession ? (
+            <RemoteSessionDetail
+              session={selectedRemoteSession}
+              onBack={() => setSelectedRemoteSession(null)}
+              onCancel={async (session) => {
+                try {
+                  const { cancelRemoteSession } = await import("./remote/worker-client.js");
+                  await cancelRemoteSession(session.workerUrl, session.sessionId);
+                  setEvents((e) => [
+                    ...e,
+                    { kind: "info", key: mkKey(), text: `Cancelled session ${session.sessionId}` },
+                  ]);
+                } catch (err) {
+                  setEvents((e) => [
+                    ...e,
+                    { kind: "error", key: mkKey(), text: `Failed to cancel: ${err instanceof Error ? err.message : String(err)}` },
+                  ]);
+                }
+                setSelectedRemoteSession(null);
+                setShowRemoteDashboard(false);
+              }}
+            />
+          ) : (
+            <RemoteDashboard
+              onSelect={(session) => setSelectedRemoteSession(session)}
+              onCancel={() => setShowRemoteDashboard(false)}
+            />
+          )}
         </Box>
       </ThemeProvider>
     );

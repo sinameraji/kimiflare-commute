@@ -65,6 +65,57 @@ export interface KimiConfig {
   filePicker?: boolean;
   /** UI theme name. Default: everforest-dark. */
   theme?: string;
+  /** Enable multi-agent system with specialized research/coding/generalist agents. Default: false. */
+  multiAgent?: boolean;
+  /** Per-agent model overrides. Falls back to the global model if not specified. */
+  agentModels?: Record<string, string>;
+  /** Per-agent reasoning effort overrides. */
+  agentReasoningEffort?: Record<string, ReasoningEffort>;
+  /** Model used for orchestrator synthesis (hand-off summaries). Defaults to plumbingModel. */
+  orchestratorModel?: string;
+  /** Enable automatic agent switching based on intent classification. Default: false. */
+  autoSwitch?: boolean;
+  /** Ask for user confirmation before auto-switching agents. Default: false. */
+  autoSwitchConfirm?: boolean;
+  /** Maximum turns per agent before forced hand-off. Default: 20. */
+  maxTurnsPerAgent?: number;
+  /** User-defined custom agents with their own tool sets and models. */
+  customAgents?: CustomAgentConfig[];
+
+  // ── Remote feature ──────────────────────────────────────────────────
+  /** URL of the remote orchestrator Worker. */
+  remoteWorkerUrl?: string;
+  /** Enable remote mode. Default: false. */
+  remoteEnabled?: boolean;
+  /** Shared secret for authenticating with the remote Worker. */
+  remoteAuthSecret?: string;
+  /** Max session TTL in minutes (default: 30). */
+  remoteTtlMinutes?: number;
+  /** Max input token budget per remote job (default: 5_000_000). */
+  remoteMaxInputTokens?: number;
+
+  // ── GitHub auth (OAuth device flow) ─────────────────────────────────
+  /** GitHub OAuth access token. */
+  githubOAuthToken?: string;
+  /** GitHub OAuth refresh token. */
+  githubRefreshToken?: string;
+  /** GitHub OAuth token expiry (Unix timestamp). */
+  githubTokenExpiry?: number;
+  /** Cached GitHub repo identifier (owner/repo). */
+  githubRepo?: string;
+}
+
+export interface CustomAgentConfig {
+  /** Unique name for the custom agent (e.g. "tester", "docs"). */
+  name: string;
+  /** Tool names this agent can use. */
+  tools: string[];
+  /** Model override for this agent. Falls back to global model. */
+  model?: string;
+  /** Custom system prompt for this agent. */
+  systemPrompt?: string;
+  /** Reasoning effort override for this agent. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.6";

@@ -1,6 +1,6 @@
-name = "kimiflare-remote"
+name = "kimiflare-commute"
 main = "src/index.ts"
-compatibility_date = "2024-10-22"
+compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Durable Objects
@@ -11,12 +11,19 @@ class_name = "SessionDO"
 # Artifacts binding
 [[artifacts]]
 binding = "ARTIFACTS"
+namespace = "default"
 
 # Sandbox binding
 [[sandbox]]
 binding = "SANDBOX"
 
-# KV for OAuth state (optional, can use DO instead)
+# D1 for telemetry and billing
+[[d1_databases]]
+binding = "DB"
+database_name = "commute-telemetry"
+database_id = ""
+
+# KV for OAuth state and session caching
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = ""
@@ -24,5 +31,6 @@ id = ""
 [vars]
 # Set via wrangler secret put:
 # REMOTE_AUTH_SECRET
-# CF_API_TOKEN
-# GITHUB_APP_CLIENT_SECRET
+# GITHUB_OAUTH_CLIENT_SECRET
+# ENCRYPTION_KEY
+# ADMIN_GITHUB_ID

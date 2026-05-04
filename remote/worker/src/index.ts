@@ -1,28 +1,314 @@
 import { Hono } from "hono";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
+import {
+  getOAuthUrl,
+  exchangeCode,
+  fetchGitHubUser,
+  listGitHubRepos,
+  isUserAllowed,
+  encryptToken,
+} from "./auth.js";
+import {
+  upsertUser,
+  listUserSessions,
+  getUserDailyUsage,
+} from "./telemetry.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Auth middleware — only for CLI-facing endpoints
-app.use("/remote/start", async (c, next) => {
-  const auth = c.req.header("Authorization");
-  const expected = `Bearer ${c.env.REMOTE_AUTH_SECRET}`;
-  if (auth !== expected) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-  await next();
-});
-app.use("/remote/cancel/*", async (c, next) => {
-  const auth = c.req.header("Authorization");
-  const expected = `Bearer ${c.env.REMOTE_AUTH_SECRET}`;
-  if (auth !== expected) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+// ── CORS for web frontend ───────────────────────────────────────────
+app.use("/api/*", async (c, next) => {
+  c.header("Access-Control-Allow-Origin", c.req.header("Origin") ?? "https://commute.kimiflare.com");
+  c.header("Access-Control-Allow-Credentials", "true");
+  c.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (c.req.method === "OPTIONS") return c.text("", 204);
   await next();
 });
 
-// Start a remote session
+app.use("/auth/*", async (c, next) => {
+  c.header("Access-Control-Allow-Origin", c.req.header("Origin") ?? "https://commute.kimiflare.com");
+  c.header("Access-Control-Allow-Credentials", "true");
+  c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  c.header("Access-Control-Allow-Headers", "Content-Type");
+  if (c.req.method === "OPTIONS") return c.text("", 204);
+  await next();
+});
+
+// ── Auth middleware for API routes ──────────────────────────────────
+async function requireAuth(c: import("hono").Context<{ Bindings: Env }>) {
+  const sessionToken = getCookie(c, "session");
+  if (!sessionToken) return null;
+
+  try {
+    const payload = JSON.parse(atob(sessionToken)) as {
+      userId: string;
+      login: string;
+      token: string;
+      exp: number;
+    };
+
+    if (payload.exp < Date.now() / 1000) return null;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// ── GitHub OAuth ────────────────────────────────────────────────────
+app.get("/auth/github", async (c) => {
+  const redirectUri = `${new URL(c.req.url).origin}/auth/github/callback`;
+  const state = crypto.randomUUID();
+
+  // Store state in KV (5 min TTL)
+  await c.env.OAUTH_KV.put(`oauth:state:${state}`, redirectUri, { expirationTtl: 300 });
+
+  const url = getOAuthUrl(c.env, redirectUri, state);
+  return c.redirect(url);
+});
+
+app.get("/auth/github/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+
+  if (!code || !state) {
+    return c.json({ error: "Missing code or state" }, 400);
+  }
+
+  // Verify state
+  const storedRedirect = await c.env.OAUTH_KV.get(`oauth:state:${state}`);
+  if (!storedRedirect) {
+    return c.json({ error: "Invalid or expired state" }, 400);
+  }
+  await c.env.OAUTH_KV.delete(`oauth:state:${state}`);
+
+  // Exchange code for token
+  let accessToken: string;
+  try {
+    accessToken = await exchangeCode(c.env, code);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "OAuth failed" }, 400);
+  }
+
+  // Fetch user
+  let user: import("./auth.js").GitHubUser;
+  try {
+    user = await fetchGitHubUser(accessToken);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "Failed to fetch user" }, 400);
+  }
+
+  // Whitelist check
+  if (!isUserAllowed(c.env, user.id)) {
+    return c.json({ error: "Not authorized" }, 403);
+  }
+
+  // Encrypt token
+  const encryptedToken = await encryptToken(accessToken, c.env.ENCRYPTION_KEY);
+
+  // Store user in D1
+  await upsertUser(c.env.DB, String(user.id), user.login, user.avatar_url);
+
+  // Set session cookie
+  const sessionPayload = {
+    userId: String(user.id),
+    login: user.login,
+    token: encryptedToken,
+    exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60, // 7 days
+  };
+
+  setCookie(c, "session", btoa(JSON.stringify(sessionPayload)), {
+    httpOnly: true,
+    secure: true,
+    sameSite: "Lax",
+    maxAge: 7 * 24 * 60 * 60,
+    path: "/",
+  });
+
+  // Redirect to app
+  return c.redirect("https://commute.kimiflare.com");
+});
+
+app.post("/auth/logout", async (c) => {
+  deleteCookie(c, "session");
+  return c.json({ ok: true });
+});
+
+// ── API: Current user ───────────────────────────────────────────────
+app.get("/api/me", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  return c.json({
+    userId: auth.userId,
+    login: auth.login,
+  });
+});
+
+// ── API: GitHub repos ───────────────────────────────────────────────
+app.get("/api/repos", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const page = Number(c.req.query("page") ?? "1");
+  const perPage = Number(c.req.query("per_page") ?? "100");
+
+  // Decrypt token
+  const { decryptToken } = await import("./auth.js");
+  let token: string;
+  try {
+    token = await decryptToken(auth.token, c.env.ENCRYPTION_KEY);
+  } catch {
+    return c.json({ error: "Invalid session" }, 401);
+  }
+
+  try {
+    const repos = await listGitHubRepos(token, page, perPage);
+    return c.json({ repos });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "Failed to list repos" }, 500);
+  }
+});
+
+// ── API: Sessions ───────────────────────────────────────────────────
+app.post("/api/sessions", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const body = await c.req.json() as {
+    prompt: string;
+    repo: { owner: string; name: string };
+    model?: string;
+    maxTurns?: number;
+    reasoningEffort?: string;
+  };
+
+  // Decrypt token
+  const { decryptToken } = await import("./auth.js");
+  let githubToken: string;
+  try {
+    githubToken = await decryptToken(auth.token, c.env.ENCRYPTION_KEY);
+  } catch {
+    return c.json({ error: "Invalid session" }, 401);
+  }
+
+  const sessionId = crypto.randomUUID();
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  const res = await doStub.fetch(new Request("http://internal/start", {
+    method: "POST",
+    body: JSON.stringify({
+      ...body,
+      githubToken,
+      userId: auth.userId,
+    }),
+    headers: { "Content-Type": "application/json" },
+  }));
+
+  const data = await res.json();
+  return c.json({ ...data, sessionId });
+});
+
+app.get("/api/sessions", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessions = await listUserSessions(c.env.DB, auth.userId, 20);
+  return c.json({ sessions });
+});
+
+app.get("/api/sessions/:sessionId", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  const res = await doStub.fetch(new Request("http://internal/status", { method: "GET" }));
+  return res;
+});
+
+app.get("/api/sessions/:sessionId/stream", async (c) => {
+  const sessionId = c.req.param("sessionId");
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  const res = await doStub.fetch(new Request("http://internal/stream", { method: "GET" }));
+  return res;
+});
+
+app.get("/api/sessions/:sessionId/terminal", async (c) => {
+  const sessionId = c.req.param("sessionId");
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  // Forward the request (including WebSocket upgrade headers)
+  const res = await doStub.fetch(new Request("http://internal/terminal", {
+    method: "GET",
+    headers: c.req.raw.headers,
+  }));
+
+  return res;
+});
+
+app.post("/api/sessions/:sessionId/cancel", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  const res = await doStub.fetch(new Request("http://internal/cancel", { method: "POST" }));
+  return res;
+});
+
+app.post("/api/sessions/:sessionId/message", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+  const id = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(id);
+
+  const body = await c.req.json();
+  const res = await doStub.fetch(new Request("http://internal/message", {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+  }));
+
+  return res;
+});
+
+// ── API: Admin usage ────────────────────────────────────────────────
+app.get("/api/admin/usage", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  if (auth.userId !== c.env.ADMIN_GITHUB_ID) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  const days = Number(c.req.query("days") ?? "30");
+  const usage = await getUserDailyUsage(c.env.DB, auth.userId, days);
+
+  return c.json({ usage });
+});
+
+// ── Legacy /remote routes (for CLI compatibility) ───────────────────
+app.use("/remote/start", async (c, next) => {
+  const auth = c.req.header("Authorization");
+  const expected = `Bearer ${c.env.REMOTE_AUTH_SECRET}`;
+  if (auth !== expected) return c.json({ error: "Unauthorized" }, 401);
+  await next();
+});
+
 app.post("/remote/start", async (c) => {
   const body = await c.req.json();
   const sessionId = crypto.randomUUID();
@@ -39,182 +325,66 @@ app.post("/remote/start", async (c) => {
   return c.json({ ...data, sessionId });
 });
 
-// Stream progress (SSE)
 app.get("/remote/stream/:sessionId", async (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/stream", {
-    method: "GET",
-  }));
-
-  return res;
+  return doStub.fetch(new Request("http://internal/stream", { method: "GET" }));
 });
 
-// Cancel session
 app.post("/remote/cancel/:sessionId", async (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/cancel", {
-    method: "POST",
-  }));
-
-  return res;
+  return doStub.fetch(new Request("http://internal/cancel", { method: "POST" }));
 });
 
-// Get session status
 app.get("/remote/status/:sessionId", async (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/status", {
-    method: "GET",
-  }));
-
-  return res;
+  return doStub.fetch(new Request("http://internal/status", { method: "GET" }));
 });
 
-// Receive progress from Sandbox
 app.post("/progress/:sessionId", async (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
   const body = await c.req.json();
-  const res = await doStub.fetch(new Request("http://internal/progress", {
+  return doStub.fetch(new Request("http://internal/progress", {
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
   }));
-
-  return res;
 });
 
-// Finalize session (from Sandbox)
 app.post("/finalize/:sessionId", async (c) => {
   const sessionId = c.req.param("sessionId");
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
   const body = await c.req.json();
-  const res = await doStub.fetch(new Request("http://internal/finalize", {
+  return doStub.fetch(new Request("http://internal/finalize", {
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
   }));
-
-  return res;
 });
 
-// LLM relay (from Sandbox)
 app.post("/relay", async (c) => {
-  // The relay endpoint is called by the Sandbox.
-  // We identify the session from a header or the request body.
   const sessionId = c.req.header("X-Session-Id");
-  if (!sessionId) {
-    return c.json({ error: "Missing X-Session-Id header" }, 400);
-  }
+  if (!sessionId) return c.json({ error: "Missing X-Session-Id header" }, 400);
 
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
-
   const body = await c.req.json();
-  const res = await doStub.fetch(new Request("http://internal/relay", {
+  return doStub.fetch(new Request("http://internal/relay", {
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
   }));
-
-  return res;
 });
 
-// CORS for web status page and SSE streams
-app.use("/remote/stream/*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", "*");
-  c.header("Access-Control-Allow-Methods", "GET");
-  c.header("Access-Control-Allow-Headers", "Content-Type");
-  await next();
-});
-app.use("/remote/web/*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", "*");
-  c.header("Access-Control-Allow-Methods", "GET");
-  c.header("Access-Control-Allow-Headers", "Content-Type");
-  await next();
-});
-
-// Web status page
-app.get("/remote/web/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const streamUrl = `/remote/stream/${sessionId}`;
-
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>kimiflare remote — ${sessionId}</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #0d1117; color: #c9d1d9; }
-    h1 { font-size: 1.25rem; color: #58a6ff; }
-    .event { padding: 0.5rem; margin: 0.25rem 0; border-radius: 6px; background: #161b22; font-family: monospace; font-size: 0.875rem; }
-    .event.turn_start { border-left: 3px solid #58a6ff; }
-    .event.tool_call { border-left: 3px solid #f0883e; }
-    .event.tool_result { border-left: 3px solid #3fb950; }
-    .event.error { border-left: 3px solid #f85149; }
-    .event.done { border-left: 3px solid #3fb950; background: #23863620; }
-    .status { padding: 1rem; background: #161b22; border-radius: 8px; margin-bottom: 1rem; }
-    .status.running { border: 1px solid #58a6ff; }
-    .status.done { border: 1px solid #3fb950; }
-    .status.error { border: 1px solid #f85149; }
-  </style>
-</head>
-<body>
-  <h1>�� kimiflare remote</h1>
-  <div id="status" class="status running">Connecting...</div>
-  <div id="events"></div>
-  <script>
-    const sessionId = "${sessionId}";
-    const streamUrl = "${streamUrl}";
-    const eventsDiv = document.getElementById("events");
-    const statusDiv = document.getElementById("status");
-    const evtSource = new EventSource(streamUrl);
-
-    evtSource.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      const div = document.createElement("div");
-      div.className = "event " + data.type;
-      div.textContent = JSON.stringify(data);
-      eventsDiv.appendChild(div);
-      window.scrollTo(0, document.body.scrollHeight);
-
-      if (data.type === "done") {
-        statusDiv.textContent = "✅ Done" + (data.prUrl ? " — PR: " + data.prUrl : "");
-        statusDiv.className = "status done";
-        evtSource.close();
-      } else if (data.type === "error") {
-        statusDiv.textContent = "❌ Error: " + data.message;
-        statusDiv.className = "status error";
-      } else if (data.type === "cancelled") {
-        statusDiv.textContent = "🚫 Cancelled";
-        statusDiv.className = "status error";
-      }
-    };
-
-    evtSource.onerror = () => {
-      statusDiv.textContent = "⚠️ Connection lost — reconnecting...";
-    };
-  </script>
-</body>
-</html>`;
-
-  return c.html(html);
-});
-
-// Health check
+// ── Health check ────────────────────────────────────────────────────
 app.get("/health", (c) => c.json({ ok: true }));
 
 export default app;

@@ -8,7 +8,9 @@ import {
   fetchGitHubUser,
   listGitHubRepos,
   isUserAllowed,
-  encryptToken,
+  createSession,
+  getSession,
+  deleteSession,
 } from "./auth.js";
 import {
   upsertUser,
@@ -44,24 +46,16 @@ app.use("/auth/*", async (c, next) => {
 });
 
 // ── Auth middleware for API routes ──────────────────────────────────
+// Cookie contains ONLY a harmless session ID. The actual encrypted token
+// is stored server-side in KV and decrypted on each request.
 async function requireAuth(c: import("hono").Context<{ Bindings: Env }>) {
-  const sessionToken = getCookie(c, "session");
-  if (!sessionToken) return null;
+  const sessionId = getCookie(c, "session");
+  if (!sessionId) return null;
 
-  try {
-    const payload = JSON.parse(atob(sessionToken)) as {
-      userId: string;
-      login: string;
-      token: string;
-      exp: number;
-    };
+  const session = await getSession(c.env.OAUTH_KV, c.env.ENCRYPTION_KEY, sessionId);
+  if (!session) return null;
 
-    if (payload.exp < Date.now() / 1000) return null;
-
-    return payload;
-  } catch {
-    return null;
-  }
+  return session;
 }
 
 // ── GitHub OAuth ────────────────────────────────────────────────────
@@ -112,21 +106,20 @@ app.get("/auth/github/callback", async (c) => {
     return c.json({ error: "Not authorized" }, 403);
   }
 
-  // Encrypt token
-  const encryptedToken = await encryptToken(accessToken, c.env.ENCRYPTION_KEY);
-
   // Store user in D1
   await upsertUser(c.env.DB, String(user.id), user.login, user.avatar_url);
 
-  // Set session cookie
-  const sessionPayload = {
-    userId: String(user.id),
-    login: user.login,
-    token: encryptedToken,
-    exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60, // 7 days
-  };
+  // Create server-side session (encrypted token stored in KV)
+  const sessionId = await createSession(
+    c.env.OAUTH_KV,
+    c.env.ENCRYPTION_KEY,
+    String(user.id),
+    user.login,
+    accessToken
+  );
 
-  setCookie(c, "session", btoa(JSON.stringify(sessionPayload)), {
+  // Cookie contains ONLY the harmless session ID
+  setCookie(c, "session", sessionId, {
     httpOnly: true,
     secure: true,
     sameSite: "Lax",
@@ -139,6 +132,10 @@ app.get("/auth/github/callback", async (c) => {
 });
 
 app.post("/auth/logout", async (c) => {
+  const sessionId = getCookie(c, "session");
+  if (sessionId) {
+    await deleteSession(c.env.OAUTH_KV, sessionId);
+  }
   deleteCookie(c, "session");
   return c.json({ ok: true });
 });
@@ -162,17 +159,8 @@ app.get("/api/repos", async (c) => {
   const page = Number(c.req.query("page") ?? "1");
   const perPage = Number(c.req.query("per_page") ?? "100");
 
-  // Decrypt token
-  const { decryptToken } = await import("./auth.js");
-  let token: string;
   try {
-    token = await decryptToken(auth.token, c.env.ENCRYPTION_KEY);
-  } catch {
-    return c.json({ error: "Invalid session" }, 401);
-  }
-
-  try {
-    const repos = await listGitHubRepos(token, page, perPage);
+    const repos = await listGitHubRepos(auth.token, page, perPage);
     return c.json({ repos });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : "Failed to list repos" }, 500);
@@ -192,15 +180,6 @@ app.post("/api/sessions", async (c) => {
     reasoningEffort?: string;
   };
 
-  // Decrypt token
-  const { decryptToken } = await import("./auth.js");
-  let githubToken: string;
-  try {
-    githubToken = await decryptToken(auth.token, c.env.ENCRYPTION_KEY);
-  } catch {
-    return c.json({ error: "Invalid session" }, 401);
-  }
-
   const sessionId = crypto.randomUUID();
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
@@ -209,7 +188,7 @@ app.post("/api/sessions", async (c) => {
     method: "POST",
     body: JSON.stringify({
       ...body,
-      githubToken,
+      githubToken: auth.token,
       userId: auth.userId,
     }),
     headers: { "Content-Type": "application/json" },

@@ -129,6 +129,69 @@ export function isUserAllowed(env: Env, githubId: number): boolean {
   return allowed.includes(String(githubId));
 }
 
+export interface SessionData {
+  userId: string;
+  login: string;
+  encryptedToken: string;
+  createdAt: number;
+}
+
+/**
+ * Create a new session in KV. Returns the session ID (harmless UUID).
+ * The actual encrypted token is stored server-side in KV.
+ */
+export async function createSession(
+  kv: KVNamespace,
+  key: string,
+  userId: string,
+  login: string,
+  githubToken: string
+): Promise<string> {
+  const sessionId = crypto.randomUUID();
+  const encryptedToken = await encryptToken(githubToken, key);
+
+  const session: SessionData = {
+    userId,
+    login,
+    encryptedToken,
+    createdAt: Date.now(),
+  };
+
+  // Store in KV with 7-day TTL
+  await kv.put(`session:${sessionId}`, JSON.stringify(session), {
+    expirationTtl: 7 * 24 * 60 * 60,
+  });
+
+  return sessionId;
+}
+
+/**
+ * Look up a session by ID and return decrypted user info.
+ */
+export async function getSession(
+  kv: KVNamespace,
+  key: string,
+  sessionId: string
+): Promise<{ userId: string; login: string; token: string } | null> {
+  const raw = await kv.get(`session:${sessionId}`);
+  if (!raw) return null;
+
+  try {
+    const session = JSON.parse(raw) as SessionData;
+    const token = await decryptToken(session.encryptedToken, key);
+    return { userId: session.userId, login: session.login, token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete a session from KV (logout / revoke).
+ */
+export async function deleteSession(kv: KVNamespace, sessionId: string): Promise<void> {
+  await kv.delete(`session:${sessionId}`);
+}
+
 /**
  * Encrypt a token using AES-GCM via Web Crypto.
  */

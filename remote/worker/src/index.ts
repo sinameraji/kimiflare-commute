@@ -15,8 +15,14 @@ import {
   listUserSessions,
   getUserDailyUsage,
 } from "./telemetry.js";
+import { INDEX_HTML } from "./static.js";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// ── Serve web UI ────────────────────────────────────────────────────
+app.get("/", async (c) => {
+  return c.html(INDEX_HTML);
+});
 
 // ── CORS for web frontend ───────────────────────────────────────────
 app.use("/api/*", async (c, next) => {

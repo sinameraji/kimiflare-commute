@@ -44,6 +44,8 @@ export interface Env {
   ENCRYPTION_KEY: string;
   ADMIN_GITHUB_ID: string;
   ALLOWED_GITHUB_IDS?: string;
+  CF_API_TOKEN: string;
+  ACCOUNT_ID: string;
 }
 
 // Artifacts binding types (from Cloudflare docs)

@@ -48,7 +48,8 @@ export class SessionDO implements DurableObject {
       const sandbox = await getSandbox(this.env.SANDBOX, sessionId);
 
       // 4. Clone the artifact repo into the sandbox
-      const authArtifactUrl = artifact.remote.replace("https://", `https://token:${artifactToken}@`);
+      const encodedToken = encodeURIComponent(artifactToken);
+      const authArtifactUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
       const cloneRes = await sandbox.exec(`git clone ${authArtifactUrl} /workspace/repo`);
       if (!cloneRes.success) {
         throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);

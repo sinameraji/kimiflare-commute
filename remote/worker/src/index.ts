@@ -3,7 +3,6 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
 import { Sandbox } from "@cloudflare/sandbox";
-import { WarmPool } from "@cloudflare/sandbox/bridge";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -14,13 +13,7 @@ import {
   getSession,
   deleteSession,
 } from "./auth.js";
-import {
-  upsertUser,
-  listUserSessions,
-  getUserDailyUsage,
-} from "./telemetry.js";
 import { INDEX_HTML } from "./static.js";
-import { XTERM_JS, XTERM_CSS } from "./vendor/xterm/bundle.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -29,41 +22,7 @@ app.get("/", async (c) => {
   return c.html(INDEX_HTML);
 });
 
-// ── Serve vendored xterm.js (self-hosted, no CDN) ───────────────────
-app.get("/xterm.js", (c) => {
-  c.header("Content-Type", "application/javascript; charset=utf-8");
-  c.header("Cache-Control", "public, max-age=86400");
-  return c.body(XTERM_JS);
-});
-
-app.get("/xterm.css", (c) => {
-  c.header("Content-Type", "text/css; charset=utf-8");
-  c.header("Cache-Control", "public, max-age=86400");
-  return c.body(XTERM_CSS);
-});
-
-// ── CORS for web frontend ───────────────────────────────────────────
-app.use("/api/*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", c.req.header("Origin") ?? "https://commute.kimiflare.com");
-  c.header("Access-Control-Allow-Credentials", "true");
-  c.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (c.req.method === "OPTIONS") return c.body(null, 204);
-  await next();
-});
-
-app.use("/auth/*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", c.req.header("Origin") ?? "https://commute.kimiflare.com");
-  c.header("Access-Control-Allow-Credentials", "true");
-  c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "Content-Type");
-  if (c.req.method === "OPTIONS") return c.body(null, 204);
-  await next();
-});
-
 // ── Auth middleware for API routes ──────────────────────────────────
-// Cookie contains ONLY a harmless session ID. The actual encrypted token
-// is stored server-side in KV and decrypted on each request.
 async function requireAuth(c: import("hono").Context<{ Bindings: Env }>) {
   const sessionId = getCookie(c, "session");
   if (!sessionId) return null;
@@ -122,9 +81,6 @@ app.get("/auth/github/callback", async (c) => {
     return c.json({ error: "Not authorized" }, 403);
   }
 
-  // Store user in D1
-  await upsertUser(c.env.DB, String(user.id), user.login, user.avatar_url);
-
   // Create server-side session (encrypted token stored in KV)
   const sessionId = await createSession(
     c.env.OAUTH_KV,
@@ -144,7 +100,7 @@ app.get("/auth/github/callback", async (c) => {
   });
 
   // Redirect to app
-  return c.redirect("https://commute.kimiflare.com");
+  return c.redirect("/");
 });
 
 app.post("/auth/logout", async (c) => {
@@ -183,17 +139,14 @@ app.get("/api/repos", async (c) => {
   }
 });
 
-// ── API: Sessions ───────────────────────────────────────────────────
-app.post("/api/sessions", async (c) => {
+// ── API: Setup repo in sandbox ──────────────────────────────────────
+app.post("/api/setup", async (c) => {
   const auth = await requireAuth(c);
   if (!auth) return c.json({ error: "Unauthorized" }, 401);
 
   const body = await c.req.json() as {
-    prompt: string;
-    repo: { owner: string; name: string };
-    model?: string;
-    maxTurns?: number;
-    reasoningEffort?: string;
+    owner: string;
+    name: string;
   };
 
   const sessionId = crypto.randomUUID();
@@ -202,10 +155,11 @@ app.post("/api/sessions", async (c) => {
 
   let res: Response;
   try {
-    res = await doStub.fetch(new Request("http://internal/start", {
+    res = await doStub.fetch(new Request("http://internal/setup", {
       method: "POST",
       body: JSON.stringify({
-        ...body,
+        owner: body.owner,
+        name: body.name,
         githubToken: auth.token,
         userId: auth.userId,
       }),
@@ -216,192 +170,16 @@ app.post("/api/sessions", async (c) => {
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "Session start failed");
+    const text = await res.text().catch(() => "Setup failed");
     return c.json({ error: text }, res.status as 500);
   }
 
-  let data: Record<string, unknown>;
-  try {
-    data = (await res.json()) as Record<string, unknown>;
-  } catch {
-    return c.json({ error: "Invalid response from session worker" }, 500);
-  }
-  return c.json({ ...data, sessionId });
-});
-
-app.get("/api/sessions", async (c) => {
-  const auth = await requireAuth(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
-
-  const sessions = await listUserSessions(c.env.DB, auth.userId, 20);
-  return c.json({ sessions });
-});
-
-app.get("/api/sessions/:sessionId", async (c) => {
-  const auth = await requireAuth(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
-
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/status", { method: "GET" }));
-  return res;
-});
-
-app.get("/api/sessions/:sessionId/stream", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/stream", { method: "GET" }));
-  return res;
-});
-
-app.get("/api/sessions/:sessionId/terminal", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  // Forward the request (including WebSocket upgrade headers)
-  const res = await doStub.fetch(new Request("http://internal/terminal", {
-    method: "GET",
-    headers: c.req.raw.headers,
-  }));
-
-  return res;
-});
-
-app.post("/api/sessions/:sessionId/cancel", async (c) => {
-  const auth = await requireAuth(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
-
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/cancel", { method: "POST" }));
-  return res;
-});
-
-app.post("/api/sessions/:sessionId/message", async (c) => {
-  const auth = await requireAuth(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
-
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  const body = await c.req.json();
-  const res = await doStub.fetch(new Request("http://internal/message", {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
-  }));
-
-  return res;
-});
-
-// ── API: Admin usage ────────────────────────────────────────────────
-app.get("/api/admin/usage", async (c) => {
-  const auth = await requireAuth(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
-
-  if (auth.userId !== c.env.ADMIN_GITHUB_ID) {
-    return c.json({ error: "Forbidden" }, 403);
-  }
-
-  const days = Number(c.req.query("days") ?? "30");
-  const usage = await getUserDailyUsage(c.env.DB, auth.userId, days);
-
-  return c.json({ usage });
-});
-
-// ── Legacy /remote routes (for CLI compatibility) ───────────────────
-app.use("/remote/start", async (c, next) => {
-  const auth = c.req.header("Authorization");
-  const expected = `Bearer ${c.env.REMOTE_AUTH_SECRET}`;
-  if (auth !== expected) return c.json({ error: "Unauthorized" }, 401);
-  await next();
-});
-
-app.post("/remote/start", async (c) => {
-  const body = await c.req.json();
-  const sessionId = crypto.randomUUID();
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-
-  const res = await doStub.fetch(new Request("http://internal/start", {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
-  }));
-
-  const data = (await res.json()) as Record<string, unknown>;
-  return c.json({ ...data, sessionId });
-});
-
-app.get("/remote/stream/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  return doStub.fetch(new Request("http://internal/stream", { method: "GET" }));
-});
-
-app.post("/remote/cancel/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  return doStub.fetch(new Request("http://internal/cancel", { method: "POST" }));
-});
-
-app.get("/remote/status/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  return doStub.fetch(new Request("http://internal/status", { method: "GET" }));
-});
-
-app.post("/progress/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  const body = await c.req.json();
-  return doStub.fetch(new Request("http://internal/progress", {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
-  }));
-});
-
-app.post("/finalize/:sessionId", async (c) => {
-  const sessionId = c.req.param("sessionId");
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  const body = await c.req.json();
-  return doStub.fetch(new Request("http://internal/finalize", {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
-  }));
-});
-
-app.post("/relay", async (c) => {
-  const sessionId = c.req.header("X-Session-Id");
-  if (!sessionId) return c.json({ error: "Missing X-Session-Id header" }, 400);
-
-  const id = c.env.SESSION_DO.idFromName(sessionId);
-  const doStub = c.env.SESSION_DO.get(id);
-  const body = await c.req.json();
-  return doStub.fetch(new Request("http://internal/relay", {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "Content-Type": "application/json" },
-  }));
+  const data = (await res.json()) as { success: boolean; output?: string; error?: string };
+  return c.json(data);
 });
 
 // ── Health check ────────────────────────────────────────────────────
 app.get("/health", (c) => c.json({ ok: true }));
 
 export default app;
-export { SessionDO, Sandbox, WarmPool };
+export { SessionDO, Sandbox };

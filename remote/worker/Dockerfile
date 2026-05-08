@@ -1,11 +1,8 @@
 FROM docker.io/cloudflare/sandbox:0.10.0
 
-# Install git and curl (needed for repo operations)
+# Install git (needed for repo clone operations)
 USER root
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
-
-# Install pnpm globally
-RUN npm install -g pnpm
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 # Ensure workspace exists
 RUN mkdir -p /workspace && chown -R 1000:1000 /workspace

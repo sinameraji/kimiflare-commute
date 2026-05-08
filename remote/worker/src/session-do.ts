@@ -1,6 +1,5 @@
 import type { SessionState, Env } from "./types.js";
 import { getSandbox } from "@cloudflare/sandbox";
-import { decryptToken } from "./auth.js";
 
 export class SessionDO implements DurableObject {
   private state: DurableObjectState;
@@ -31,7 +30,7 @@ export class SessionDO implements DurableObject {
     };
 
     const { owner, name, githubToken, userId } = body;
-    const sessionId = this.state.id.toString();
+    const sessionId = crypto.randomUUID();
     const githubUrl = `https://github.com/${owner}/${name}.git`;
 
     try {

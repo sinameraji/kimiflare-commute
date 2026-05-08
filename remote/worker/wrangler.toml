@@ -13,10 +13,6 @@ class_name = "SessionDO"
 name = "SANDBOX"
 class_name = "Sandbox"
 
-[[durable_objects.bindings]]
-name = "WARM_POOL"
-class_name = "WarmPool"
-
 # Containers (Sandbox)
 [[containers]]
 class_name = "Sandbox"
@@ -24,20 +20,10 @@ image = "./Dockerfile"
 instance_type = "basic"
 max_instances = 5
 
-[[migrations]]
-tag = "v2"
-new_sqlite_classes = ["Sandbox", "WarmPool"]
-
 # Artifacts binding
 [[artifacts]]
 binding = "ARTIFACTS"
 namespace = "default"
-
-# D1 for telemetry and billing
-[[d1_databases]]
-binding = "DB"
-database_name = "commute-telemetry"
-database_id = "5f7633c1-0ea2-4bdf-8a23-76c5ab15bb3a"
 
 # KV for OAuth state and session caching
 [[kv_namespaces]]
@@ -45,6 +31,6 @@ binding = "OAUTH_KV"
 id = "4c23fe928c814a01b0384b58330eff3f"
 
 # Secrets (set via wrangler secret put)
-# GITHUB_CLIENT_ID
-# GITHUB_CLIENT_SECRET
+# GITHUB_OAUTH_CLIENT_ID
+# GITHUB_OAUTH_CLIENT_SECRET
 # ENCRYPTION_KEY

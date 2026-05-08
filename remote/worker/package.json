@@ -9,10 +9,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/sandbox": "^0.9.2",
     "hono": "^4.6.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241022.0",
+    "esbuild": "^0.25.0",
     "typescript": "^5.7.2",
     "wrangler": "^4.87.0"
   }

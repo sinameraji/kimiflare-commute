@@ -43,6 +43,7 @@ export async function createPullRequest(
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       "Content-Type": "application/json",
+      "User-Agent": "kimiflare-commute",
     },
     body: JSON.stringify({
       title,
@@ -70,6 +71,7 @@ export async function getDefaultBranch(
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "kimiflare-commute",
     },
   });
 
@@ -81,11 +83,39 @@ export async function getDefaultBranch(
   return data.default_branch;
 }
 
+export async function createIssue(
+  token: string,
+  repo: GitHubRepo,
+  title: string,
+  body: string,
+): Promise<{ html_url: string; number: number }> {
+  const res = await fetch(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+      "User-Agent": "kimiflare-commute",
+    },
+    body: JSON.stringify({ title, body }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub issue creation failed: ${res.status} ${text}`);
+  }
+
+  const data = await res.json() as { html_url: string; number: number };
+  return data;
+}
+
 export async function validateToken(token: string): Promise<boolean> {
   const res = await fetch(`${GITHUB_API_BASE}/user`, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
+      "User-Agent": "kimiflare-commute",
     },
   });
   return res.ok;

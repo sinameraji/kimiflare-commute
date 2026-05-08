@@ -78,6 +78,7 @@ export async function fetchGitHubUser(token: string): Promise<GitHubUser> {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "kimiflare-commute",
     },
   });
 
@@ -104,6 +105,7 @@ export async function listGitHubRepos(token: string, page = 1, perPage = 100): P
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "kimiflare-commute",
     },
   });
 
@@ -193,21 +195,30 @@ export async function deleteSession(kv: KVNamespace, sessionId: string): Promise
 }
 
 /**
+ * Derive a 256-bit AES key from an arbitrary-length secret string.
+ */
+async function deriveKey(secret: string): Promise<CryptoKey> {
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(secret);
+  // Hash to exactly 32 bytes (256 bits) so any secret length works
+  const hash = await crypto.subtle.digest("SHA-256", keyData);
+  return crypto.subtle.importKey(
+    "raw",
+    hash,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/**
  * Encrypt a token using AES-GCM via Web Crypto.
  */
 export async function encryptToken(token: string, key: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(token);
 
-  // Derive a 256-bit key from the secret string
-  const keyData = encoder.encode(key);
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    keyData,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
+  const cryptoKey = await deriveKey(key);
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt(
@@ -238,15 +249,7 @@ export async function decryptToken(encryptedToken: string, key: string): Promise
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
 
-  // Derive key
-  const keyData = encoder.encode(key);
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    keyData,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
+  const cryptoKey = await deriveKey(key);
 
   const decrypted = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv },

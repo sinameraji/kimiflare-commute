@@ -1,5 +1,5 @@
 import type { SessionState, RemoteProgressEvent, Env } from "./types.js";
-import { createPullRequest, getDefaultBranch } from "./github.js";
+import { createPullRequest, createIssue, getDefaultBranch } from "./github.js";
 import { decryptToken } from "./auth.js";
 import {
   createSession,
@@ -19,7 +19,7 @@ export class SessionDO implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
   private sessionState: SessionState | null = null;
-  private clients: Set<ReadableStreamDefaultController<string>> = new Set();
+  private clients: Set<ReadableStreamDefaultController<Uint8Array>> = new Set();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private idleTimeout: ReturnType<typeof setTimeout> | null = null;
   private sandboxActiveStart: number | null = null;
@@ -83,130 +83,327 @@ export class SessionDO implements DurableObject {
       sandboxInstanceType?: string;
     };
 
-    const ttlMinutes = body.ttlMinutes ?? 30;
     const sessionId = this.state.id.toString();
+    const sandboxId = sessionId.replace(/-/g, "").slice(0, 32);
     const branch = `kimiflare/commute/${sessionId}`;
-    const instanceType = body.sandboxInstanceType ?? "standard-1";
 
-    // Create session record in D1
-    await createSession(this.env.DB, {
-      id: sessionId,
-      userId: body.userId,
-      repoOwner: body.repo.owner,
-      repoName: body.repo.name,
-      branch,
-      sandboxInstanceType: instanceType,
-    });
-
-    // Import GitHub repo into Artifacts (or fork from baseline)
-    const baselineName = `baseline-${body.userId}-${body.repo.owner}-${body.repo.name}`;
-    let artifactsRepo;
-
-    try {
-      // Try to fork from existing baseline
-      const baseline = await this.env.ARTIFACTS.get(baselineName);
-      artifactsRepo = await baseline.fork(`session-${sessionId}`, {
-        description: `Commute session for ${body.repo.owner}/${body.repo.name}`,
-        readOnly: false,
-      });
-    } catch {
-      // Baseline doesn't exist — import from GitHub
-      artifactsRepo = await this.env.ARTIFACTS.import({
-        source: {
-          url: `https://github.com/${body.repo.owner}/${body.repo.name}.git`,
-          branch: "main",
-        },
-        target: {
-          name: `session-${sessionId}`,
-        },
-      });
-
-      // Also create baseline for future sessions (fire and forget)
-      this.createBaseline(body.repo, body.githubToken, baselineName).catch(() => {
-        // ignore baseline creation failures
-      });
-    }
-
-    // Create write token for Artifacts
-    const repoHandle = await this.env.ARTIFACTS.get(artifactsRepo.name);
-    const tokenResult = await repoHandle.createToken("write", 4 * 60 * 60); // 4h TTL
-
-    // Get Sandbox
-    const { getSandbox } = await import("@cloudflare/sandbox");
-    const sandbox = getSandbox(this.env.SANDBOX, sessionId, {
-      keepAlive: true,
-    });
-
-    // Write git config and setup remotes
-    const githubRemote = `https://x:${body.githubToken}@github.com/${body.repo.owner}/${body.repo.name}.git`;
-    const artifactsRemote = artifactsRepo.remote.replace(
-      "https://",
-      `https://x:${tokenResult.plaintext}@`
-    );
-
-    await sandbox.writeFile(
-      "/workspace/.gitconfig",
-      `[user]
-  name = KimiFlare
-  email = kimiflare@proton.me
-`
-    );
-
-    // Clone from Artifacts and add GitHub remote
-    await sandbox.exec("git", ["clone", artifactsRemote, "/workspace/repo"], {
-      timeout: 120_000,
-    });
-
-    await sandbox.exec("git", ["remote", "add", "github", githubRemote], {
-      cwd: "/workspace/repo",
-    });
-
-    await sandbox.exec("git", ["checkout", "-b", branch], {
-      cwd: "/workspace/repo",
-    });
-
-    this.sessionState = {
-      sessionId,
-      userId: body.userId,
-      status: "idle",
-      prompt: body.prompt,
-      repo: body.repo,
-      branch,
-      artifactsRepo: {
-        name: artifactsRepo.name,
-        url: artifactsRepo.remote,
-        writeToken: tokenResult.plaintext,
-      },
-      sandboxId: sessionId,
-      githubToken: body.githubToken,
-      progressEvents: [],
-      maxTurns: body.maxTurns ?? 50,
-      currentTurn: 0,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      startedAt: Date.now(),
-      model: body.model,
-      reasoningEffort: body.reasoningEffort,
-      ttlMinutes,
-      sandboxInstanceType: instanceType,
-      sandboxActiveSeconds: 0,
-    };
-
-    await this.saveState();
-
-    // Set alarm for max session duration
-    const alarmMs = Math.min(ttlMinutes * 60 * 1000, MAX_SESSION_DURATION_MS);
-    await this.state.storage.setAlarm(Date.now() + alarmMs);
-
-    // Start heartbeat
-    this.startHeartbeat();
+    // Kick off background work and return immediately
+    const backgroundWork = this.runStartWorkflow(body, sessionId, sandboxId, branch);
+    this.state.waitUntil(backgroundWork);
 
     return Response.json({
       sessionId,
       streamUrl: `/api/sessions/${sessionId}/stream`,
       terminalUrl: `/api/sessions/${sessionId}/terminal`,
-      status: "idle",
+      status: "starting",
     });
+  }
+
+  private async runStartWorkflow(
+    body: {
+      prompt: string;
+      repo: { owner: string; name: string };
+      githubToken: string;
+      userId: string;
+      model?: string;
+      maxTurns?: number;
+      reasoningEffort?: string;
+      ttlMinutes?: number;
+      sandboxInstanceType?: string;
+    },
+    sessionId: string,
+    sandboxId: string,
+    branch: string
+  ): Promise<void> {
+    let artifactsRepo: { name: string; remote: string } | undefined;
+    let sandbox: Awaited<ReturnType<typeof import("@cloudflare/sandbox").getSandbox>> | undefined;
+
+    const step = (stepId: string, status: "pending" | "running" | "success" | "error", message: string, extra?: Record<string, unknown>) => {
+      const ev: RemoteProgressEvent = { type: "step", step: stepId, status, message, ...extra };
+      this.broadcast(ev);
+      if (this.sessionState) {
+        this.sessionState.progressEvents.push(ev);
+        if (this.sessionState.progressEvents.length > MAX_EVENTS) {
+          this.sessionState.progressEvents.shift();
+        }
+        this.saveState();
+      }
+    };
+
+    try {
+      const ttlMinutes = body.ttlMinutes ?? 30;
+      const instanceType = body.sandboxInstanceType ?? "standard-1";
+
+      step("d1_create", "running", "Creating session record in D1...");
+      await createSession(this.env.DB, {
+        id: sessionId,
+        userId: body.userId,
+        repoOwner: body.repo.owner,
+        repoName: body.repo.name,
+        branch,
+        sandboxInstanceType: instanceType,
+      });
+      step("d1_create", "success", "Session record created");
+
+      step("artifacts_import", "running", "Importing repository into Artifacts...");
+      const baselineName = `baseline-${body.userId}-${body.repo.owner}-${body.repo.name}`;
+      const importStart = Date.now();
+
+      try {
+        const baseline = await this.env.ARTIFACTS.get(baselineName);
+        artifactsRepo = await baseline.fork(`session-${sessionId}`, {
+          description: `Commute session for ${body.repo.owner}/${body.repo.name}`,
+          readOnly: false,
+        });
+      } catch {
+        artifactsRepo = await this.env.ARTIFACTS.import({
+          source: {
+            url: `https://github.com/${body.repo.owner}/${body.repo.name}.git`,
+            branch: "main",
+          },
+          target: {
+            name: `session-${sessionId}`,
+          },
+        });
+        this.createBaseline(body.repo, body.githubToken, baselineName).catch(() => {});
+      }
+      if (!artifactsRepo) {
+        throw new Error("Failed to import repository into Artifacts");
+      }
+      step("artifacts_import", "success", `Repository imported as "${artifactsRepo.name}"`, { durationMs: Date.now() - importStart });
+
+      step("artifacts_token", "running", "Creating write token for Artifacts...");
+      const repoHandle = await this.env.ARTIFACTS.get(artifactsRepo.name);
+      const tokenResult = await repoHandle.createToken("write", 4 * 60 * 60);
+      step("artifacts_token", "success", "Write token created (4h TTL)");
+
+      step("sandbox_get", "running", "Getting Sandbox DO stub...");
+      const { getSandbox } = await import("@cloudflare/sandbox");
+      sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, sandboxId, { keepAlive: true });
+      step("sandbox_get", "success", `Sandbox stub obtained (ID: ${sandboxId})`);
+
+      step("sandbox_provision", "running", "Waiting for container to provision...");
+      const provisionStart = Date.now();
+      const provisioned = await this.waitForSandbox(sandbox, step);
+      if (!provisioned) {
+        throw new Error("Container failed to provision after maximum retries");
+      }
+      step("sandbox_provision", "success", "Container provisioned and ready", { durationMs: Date.now() - provisionStart });
+
+      const githubRemote = `https://x:${body.githubToken}@github.com/${body.repo.owner}/${body.repo.name}.git`;
+      const artifactsRemote = artifactsRepo.remote.replace(
+        "https://",
+        `https://x:${encodeURIComponent(tokenResult.plaintext)}@`
+      );
+
+      step("git_config", "running", "Writing git config...");
+      await sandbox.writeFile(
+        "/workspace/.gitconfig",
+        `[user]\n  name = KimiFlare\n  email = kimiflare@proton.me\n`
+      );
+      step("git_config", "success", "Git config written");
+
+      step("git_clone", "running", "Cloning repository from Artifacts...");
+      await sandbox.exec("rm -rf /workspace");
+      const cloneResult = await sandbox.exec(`git clone ${artifactsRemote} /workspace`, { timeout: 120_000 });
+      if (cloneResult.exitCode !== 0) {
+        throw new Error(`git clone failed (exit ${cloneResult.exitCode}): ${cloneResult.stderr || cloneResult.stdout || "unknown error"}`);
+      }
+      step("git_clone", "success", "Repository cloned to /workspace");
+
+      step("git_remote", "running", "Adding GitHub remote...");
+      const remoteResult = await sandbox.exec(`git remote add github ${githubRemote}`, { cwd: "/workspace" });
+      if (remoteResult.exitCode !== 0) {
+        await sandbox.exec(`git remote set-url github ${githubRemote}`, { cwd: "/workspace" });
+      }
+      step("git_remote", "success", "GitHub remote added");
+
+      step("git_branch", "running", `Creating and checking out branch "${branch}"...`);
+      const branchResult = await sandbox.exec(`git checkout -B ${branch}`, { cwd: "/workspace" });
+      if (branchResult.exitCode !== 0) {
+        throw new Error(`git checkout failed (exit ${branchResult.exitCode}): ${branchResult.stderr || branchResult.stdout || "unknown error"}`);
+      }
+      step("git_branch", "success", `Branch "${branch}" ready`);
+
+      this.sessionState = {
+        sessionId,
+        userId: body.userId,
+        status: "running",
+        prompt: body.prompt,
+        repo: body.repo,
+        branch,
+        artifactsRepo: {
+          name: artifactsRepo.name,
+          url: artifactsRepo.remote,
+          writeToken: tokenResult.plaintext,
+        },
+        sandboxId,
+        githubToken: body.githubToken,
+        progressEvents: [],
+        maxTurns: body.maxTurns ?? 50,
+        currentTurn: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        startedAt: Date.now(),
+        model: body.model,
+        reasoningEffort: body.reasoningEffort,
+        ttlMinutes,
+        sandboxInstanceType: instanceType,
+        sandboxActiveSeconds: 0,
+      };
+
+      await this.saveState();
+
+      const alarmMs = Math.min(ttlMinutes * 60 * 1000, MAX_SESSION_DURATION_MS);
+      await this.state.storage.setAlarm(Date.now() + alarmMs);
+      this.startHeartbeat();
+
+      // Start KimiFlare agent in the background
+      const host = "commute.kimiflare.com"; // TODO: derive from request headers in production
+      const agentEnv: Record<string, string> = {
+        SESSION_ID: sessionId,
+        ARTIFACTS_URL: artifactsRepo.remote,
+        ARTIFACTS_TOKEN: tokenResult.plaintext,
+        REPO_OWNER: body.repo.owner,
+        REPO_NAME: body.repo.name,
+        GITHUB_BRANCH: branch,
+        PROMPT: body.prompt,
+        MODEL: body.model ?? "@cf/moonshotai/kimi-k2.6",
+        MAX_TURNS: String(body.maxTurns ?? 50),
+        REASONING_EFFORT: body.reasoningEffort ?? "medium",
+        ACCOUNT_ID: this.env.ACCOUNT_ID,
+        API_TOKEN: this.env.CF_API_TOKEN,
+        PROGRESS_URL: `https://${host}/api/sessions/${sessionId}/progress`,
+        FINALIZE_URL: `https://${host}/api/sessions/${sessionId}/finalize`,
+      };
+
+      const agentWork = this.runAgent(sandbox, agentEnv, step);
+      this.state.waitUntil(agentWork);
+
+      step("session_ready", "success", "KimiFlare agent started — streaming progress", {
+        streamUrl: `/api/sessions/${sessionId}/stream`,
+        terminalUrl: `/api/sessions/${sessionId}/terminal`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[SessionDO] runStartWorkflow failed:", message);
+
+      step("session_ready", "error", "Session failed to start", { detail: message });
+
+      if (sandbox) {
+        try { await sandbox.destroy(); } catch {}
+      }
+      if (artifactsRepo) {
+        try { await this.env.ARTIFACTS.delete(artifactsRepo.name); } catch {}
+      }
+      await updateSessionStatus(this.env.DB, sessionId, "error", {
+        ended_at: Date.now(),
+        error_message: message,
+        error_category: "agent-crash",
+      });
+    }
+  }
+
+  private async waitForSandbox(
+    sandbox: Awaited<ReturnType<typeof import("@cloudflare/sandbox").getSandbox>>,
+    step: (stepId: string, status: "pending" | "running" | "success" | "error", message: string, extra?: Record<string, unknown>) => void
+  ): Promise<boolean> {
+    const maxAttempts = 10;
+    let delay = 3000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await sandbox.exec("echo ready", { timeout: 10_000 });
+        if (result.exitCode === 0) {
+          return true;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        step("sandbox_provision", "running", `Container not ready (attempt ${attempt}/${maxAttempts})`, {
+          attempt,
+          maxAttempts,
+          detail: msg,
+        });
+      }
+
+      if (attempt < maxAttempts) {
+        step("sandbox_provision", "running", `Waiting ${delay}ms before retry...`, { attempt, maxAttempts });
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 30000);
+      }
+    }
+
+    return false;
+  }
+
+  private async runAgent(
+    sandbox: Awaited<ReturnType<typeof import("@cloudflare/sandbox").getSandbox>>,
+    env: Record<string, string>,
+    step: (stepId: string, status: "pending" | "running" | "success" | "error", message: string, extra?: Record<string, unknown>) => void
+  ): Promise<void> {
+    let buffer = "";
+
+    try {
+      step("agent_start", "running", "Starting KimiFlare agent...");
+      await sandbox.exec("node /opt/kimiflare/remote-agent.mjs", {
+        env,
+        stream: true,
+        onOutput: (stream, data) => {
+          if (stream !== "stdout") return;
+          buffer += data;
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const event = JSON.parse(trimmed) as RemoteProgressEvent;
+              this.broadcast(event);
+              if (this.sessionState) {
+                this.sessionState.progressEvents.push(event);
+                if (this.sessionState.progressEvents.length > MAX_EVENTS) {
+                  this.sessionState.progressEvents.shift();
+                }
+                if (event.type === "turn_start" && typeof (event as Record<string, unknown>).turn === "number") {
+                  this.sessionState.currentTurn = (event as Record<string, unknown>).turn as number;
+                }
+                if (event.type === "usage" && typeof (event as Record<string, unknown>).promptTokens === "number") {
+                  const promptTokens = (event as Record<string, unknown>).promptTokens as number;
+                  const completionTokens = (event as Record<string, unknown>).completionTokens as number;
+                  this.sessionState.tokensUsed = (this.sessionState.tokensUsed ?? 0) + promptTokens + completionTokens;
+                }
+                this.saveState().catch(() => {});
+              }
+            } catch {
+              // Not JSON — treat as raw log
+              this.broadcast({ type: "log", text: trimmed });
+              if (this.sessionState) {
+                this.sessionState.sandboxLogs = this.sessionState.sandboxLogs ?? [];
+                this.sessionState.sandboxLogs.push(trimmed);
+                if (this.sessionState.sandboxLogs.length > 500) {
+                  this.sessionState.sandboxLogs.shift();
+                }
+              }
+            }
+          }
+        },
+        onComplete: (result) => {
+          if (result.exitCode === 0) {
+            step("agent_start", "success", "Agent completed");
+          } else {
+            step("agent_start", "error", `Agent exited with code ${result.exitCode}`, {
+              stderr: result.stderr,
+            });
+          }
+        },
+        onError: (error) => {
+          step("agent_start", "error", `Agent error: ${error.message}`);
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      step("agent_start", "error", `Failed to run agent: ${message}`);
+    }
   }
 
   private async createBaseline(
@@ -231,7 +428,7 @@ export class SessionDO implements DurableObject {
     }
 
     const { getSandbox } = await import("@cloudflare/sandbox");
-    const sandbox = getSandbox(this.env.SANDBOX, this.sessionState.sandboxId!);
+    const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
 
     // Ensure keepAlive is true while user is connected
     await sandbox.setKeepAlive(true);
@@ -264,13 +461,13 @@ export class SessionDO implements DurableObject {
 
   private handleStream(): Response {
     const encoder = new TextEncoder();
-    const stream = new ReadableStream<string>({
+    const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.clients.add(controller);
         // Send existing events
         if (this.sessionState) {
           for (const ev of this.sessionState.progressEvents) {
-            controller.enqueue(`data: ${JSON.stringify(ev)}\n\n`);
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
           }
         }
       },
@@ -286,7 +483,7 @@ export class SessionDO implements DurableObject {
       },
     });
 
-    return new Response(stream as unknown as ReadableStream<Uint8Array>, {
+    return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -318,13 +515,15 @@ export class SessionDO implements DurableObject {
   }
 
   private async handleProgress(request: Request): Promise<Response> {
-    const body = await request.json() as { events: RemoteProgressEvent[] };
+    const body = await request.json() as RemoteProgressEvent | { events: RemoteProgressEvent[] };
 
     if (!this.sessionState) {
       return Response.json({ error: "Session not found" }, { status: 404 });
     }
 
-    for (const ev of body.events) {
+    const events = Array.isArray(body) ? body : "events" in body ? body.events : [body];
+
+    for (const ev of events) {
       this.sessionState.progressEvents.push(ev);
       if (this.sessionState.progressEvents.length > MAX_EVENTS) {
         this.sessionState.progressEvents.shift();
@@ -359,7 +558,7 @@ export class SessionDO implements DurableObject {
   }
 
   private async handleFinalize(request: Request): Promise<Response> {
-    const body = await request.json() as { summary: string; commitCount: number };
+    const body = await request.json() as { exitCode: number; hasChanges: boolean; errorLog?: string };
 
     if (!this.sessionState) {
       return Response.json({ error: "Session not found" }, { status: 404 });
@@ -373,7 +572,7 @@ export class SessionDO implements DurableObject {
       githubToken = this.sessionState.githubToken!;
     }
 
-    this.sessionState.status = "done";
+    this.stopHeartbeat();
     this.sessionState.finishedAt = Date.now();
 
     // Calculate active seconds
@@ -381,19 +580,72 @@ export class SessionDO implements DurableObject {
       this.sessionState.sandboxActiveSeconds = (this.sessionState.sandboxActiveSeconds ?? 0) + Math.floor((Date.now() - this.sandboxActiveStart) / 1000);
     }
 
-    // Create PR
+    const { repo, branch, prompt } = this.sessionState;
+
     try {
-      const defaultBranch = await getDefaultBranch(githubToken, this.sessionState.repo);
+      if (body.exitCode === 0 && body.hasChanges) {
+        // Push branch to GitHub first
+        this.broadcast({ type: "step", step: "git_push", status: "running", message: "Pushing branch to GitHub..." });
+        const { getSandbox } = await import("@cloudflare/sandbox");
+        const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
+        const pushResult = await sandbox.exec(`git push github ${branch}`, { cwd: "/workspace", timeout: 60_000 });
+        if (pushResult.exitCode !== 0) {
+          throw new Error(`git push failed: ${pushResult.stderr || pushResult.stdout}`);
+        }
+        this.broadcast({ type: "step", step: "git_push", status: "success", message: "Branch pushed to GitHub" });
 
-      const pr = await createPullRequest(
-        githubToken,
-        this.sessionState.repo,
-        this.sessionState.branch,
-        `feat: ${this.sessionState.prompt.slice(0, 60)}`,
-        buildPrBody(this.sessionState, body.summary, body.commitCount),
-      );
-
-      this.sessionState.prUrl = pr.html_url;
+        // Create PR
+        const defaultBranch = await getDefaultBranch(githubToken, repo);
+        const pr = await createPullRequest(
+          githubToken,
+          repo,
+          branch,
+          `kimiflare remote: ${prompt.slice(0, 80)}`,
+          buildPrBody(this.sessionState, body.errorLog),
+        );
+        this.sessionState.prUrl = pr.html_url;
+        this.sessionState.status = "done";
+      } else if (body.exitCode === 0 && !body.hasChanges) {
+        // No changes — open issue with findings
+        const issue = await createIssue(
+          githubToken,
+          repo,
+          `kimiflare remote findings: ${prompt.slice(0, 80)}`,
+          `No code changes were made.\n\nPrompt: ${prompt}`,
+        );
+        this.sessionState.prUrl = issue.html_url;
+        this.sessionState.status = "done";
+      } else if (body.exitCode === 42) {
+        // Budget exhausted
+        if (body.hasChanges) {
+          const { getSandbox } = await import("@cloudflare/sandbox");
+          const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
+          await sandbox.exec(`git push github ${branch}`, { cwd: "/workspace", timeout: 60_000 });
+          const defaultBranch = await getDefaultBranch(githubToken, repo);
+          const pr = await createPullRequest(
+            githubToken,
+            repo,
+            branch,
+            `kimiflare remote (budget exhausted): ${prompt.slice(0, 80)}`,
+            `Automated changes from kimiflare remote session.\n\nPrompt: ${prompt}\n\nNote: Token budget was exhausted before completion.`,
+          );
+          this.sessionState.prUrl = pr.html_url;
+        } else {
+          const issue = await createIssue(
+            githubToken,
+            repo,
+            `kimiflare remote (budget exhausted): ${prompt.slice(0, 80)}`,
+            `No code changes were made. Token budget was exhausted.\n\nPrompt: ${prompt}`,
+          );
+          this.sessionState.prUrl = issue.html_url;
+        }
+        this.sessionState.status = "done";
+      } else {
+        // Agent error
+        this.sessionState.status = "error";
+        this.sessionState.errorMessage = body.errorLog || "Agent failed";
+        this.sessionState.errorCategory = "agent-crash";
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.sessionState.errorMessage = message;
@@ -437,7 +689,16 @@ export class SessionDO implements DurableObject {
       tokensUsed: this.sessionState.tokensUsed,
     });
 
-    // Schedule cleanup alarm (24h for artifacts, then destroy)
+    // Destroy sandbox immediately
+    try {
+      const { getSandbox } = await import("@cloudflare/sandbox");
+      const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
+      await sandbox.destroy();
+    } catch {
+      // ignore
+    }
+
+    // Schedule cleanup alarm (24h for artifacts + storage deletion)
     await this.state.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000);
 
     return Response.json({
@@ -506,7 +767,7 @@ export class SessionDO implements DurableObject {
     // Destroy sandbox
     try {
       const { getSandbox } = await import("@cloudflare/sandbox");
-      const sandbox = getSandbox(this.env.SANDBOX, this.sessionState.sandboxId!);
+      const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
       await sandbox.destroy();
     } catch {
       // ignore
@@ -535,7 +796,8 @@ export class SessionDO implements DurableObject {
   }
 
   private broadcast(event: RemoteProgressEvent): void {
-    const data = `data: ${JSON.stringify(event)}\n\n`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
     for (const client of this.clients) {
       try {
         client.enqueue(data);
@@ -558,6 +820,13 @@ export class SessionDO implements DurableObject {
     }, 30000);
   }
 
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
   private clearIdleTimeout(): void {
     if (this.idleTimeout) {
       clearTimeout(this.idleTimeout);
@@ -578,7 +847,7 @@ export class SessionDO implements DurableObject {
     // Allow sandbox to sleep
     try {
       const { getSandbox } = await import("@cloudflare/sandbox");
-      const sandbox = getSandbox(this.env.SANDBOX, this.sessionState.sandboxId!);
+      const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId!);
       await sandbox.setKeepAlive(false);
     } catch {
       // ignore
@@ -597,14 +866,14 @@ export class SessionDO implements DurableObject {
       return;
     }
 
-    // If session is idle, destroy sandbox
-    if (this.sessionState.status === "idle" || this.sessionState.status === "paused") {
+    // Destroy sandbox if it still exists (safety net for all terminal states)
+    if (this.sessionState.sandboxId) {
       try {
         const { getSandbox } = await import("@cloudflare/sandbox");
-        const sandbox = getSandbox(this.env.SANDBOX, this.sessionState.sandboxId!);
+        const sandbox = getSandbox(this.env.SANDBOX as DurableObjectNamespace<undefined>, this.sessionState.sandboxId);
         await sandbox.destroy();
       } catch {
-        // ignore
+        // ignore — may already be destroyed
       }
     }
 
@@ -624,8 +893,7 @@ export class SessionDO implements DurableObject {
 
 function buildPrBody(
   state: SessionState,
-  summary: string,
-  commitCount: number,
+  errorLog?: string,
 ): string {
   return `## 🚆 KimiFlare Commute Session
 
@@ -633,12 +901,9 @@ function buildPrBody(
 **Prompt:**
 > ${state.prompt}
 
-**Summary:**
-${summary}
-
-**Commits:** ${commitCount}
 **Turns:** ${state.currentTurn} / ${state.maxTurns}
 **Status:** ${state.status === "done" ? "✅ Completed" : "⚠️ Incomplete"}
+${errorLog ? `\n**Error log:**\n\`\`\`\n${errorLog}\n\`\`\`` : ""}
 
 ---
 *This PR was generated by [kimiflare](https://github.com/sinameraji/kimiflare) in commute mode.*

@@ -1,138 +1,101 @@
-export interface RemoteProgressEvent {
-  type: string;
-  [key: string]: unknown;
+/// <reference types="@cloudflare/workers-types" />
+
+export interface ArtifactsRegistry {
+  get(name: string): {
+    fork(name: string, opts?: { description?: string; readOnly?: boolean }): Promise<{ name: string; remote: string }>;
+    createToken(permission: string, ttlSeconds: number): Promise<{ plaintext: string }>;
+  };
+  import(opts: {
+    source: { url: string; branch: string };
+    target: { name: string };
+  }): Promise<{ name: string; remote: string }>;
+  delete(name: string): Promise<void>;
+}
+
+export interface Env {
+  // Durable Objects
+  SESSION_DO: DurableObjectNamespace;
+  SANDBOX: DurableObjectNamespace;
+  WARM_POOL: DurableObjectNamespace;
+
+  // Bindings
+  ARTIFACTS: ArtifactsRegistry;
+  DB: D1Database;
+  OAUTH_KV: KVNamespace;
+
+  // Secrets
+  GITHUB_OAUTH_CLIENT_ID: string;
+  GITHUB_OAUTH_CLIENT_SECRET: string;
+  ENCRYPTION_KEY: string;
+  ALLOWED_GITHUB_IDS?: string;
+  ADMIN_GITHUB_ID?: string;
+  REMOTE_AUTH_SECRET?: string;
+  ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
 }
 
 export interface SessionState {
   sessionId: string;
   userId: string;
-  status: "idle" | "running" | "paused" | "done" | "error" | "cancelled";
+  status: "idle" | "running" | "done" | "error" | "cancelled";
   prompt: string;
   repo: { owner: string; name: string };
   branch: string;
-  artifactsRepo?: { name: string; url: string; writeToken: string };
+  artifactsRepo?: {
+    name: string;
+    url: string;
+    writeToken: string;
+  };
   sandboxId?: string;
   githubToken?: string;
   progressEvents: RemoteProgressEvent[];
-  prUrl?: string;
-  errorMessage?: string;
-  errorCategory?: "agent-crash" | "sandbox-oom" | "github-api" | "timeout" | "unknown";
-  createdAt: number;
-  updatedAt: number;
-  startedAt?: number;
-  finishedAt?: number;
   maxTurns: number;
   currentTurn: number;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number;
+  finishedAt?: number;
   model?: string;
   reasoningEffort?: string;
   ttlMinutes: number;
+  sandboxInstanceType: string;
+  sandboxActiveSeconds: number;
   tokensUsed?: number;
-  tokensBudget?: number;
-  sandboxInstanceType?: string;
-  sandboxActiveSeconds?: number;
+  prUrl?: string;
+  errorMessage?: string;
+  errorCategory?: string;
+  sandboxLogs?: string[];
 }
 
-export interface Env {
-  SESSION_DO: DurableObjectNamespace;
-  ARTIFACTS: Artifacts;
-  SANDBOX: DurableObjectNamespace;
-  DB: D1Database;
-  OAUTH_KV: KVNamespace;
-  REMOTE_AUTH_SECRET: string;
-  GITHUB_OAUTH_CLIENT_ID: string;
-  GITHUB_OAUTH_CLIENT_SECRET: string;
-  ENCRYPTION_KEY: string;
-  ADMIN_GITHUB_ID: string;
-  ALLOWED_GITHUB_IDS?: string;
-  CF_API_TOKEN: string;
-  ACCOUNT_ID: string;
+export interface RemoteProgressEvent {
+  type: string;
+  [key: string]: unknown;
 }
 
-// Artifacts binding types (from Cloudflare docs)
-export interface Artifacts {
-  create(name: string, opts?: ArtifactsCreateRepoOptions): Promise<ArtifactsCreateRepoResult>;
-  get(name: string): Promise<ArtifactsRepo>;
-  list(opts?: { limit?: number; cursor?: string }): Promise<ArtifactsRepoListResult>;
-  import(params: ArtifactsImportParams): Promise<ArtifactsCreateRepoResult>;
-  delete(name: string): Promise<boolean>;
+export interface StepEvent {
+  type: "step_start" | "step_complete" | "step_retry" | "step_error" | "step_wait";
+  step: string;
+  message: string;
+  attempt?: number;
+  maxAttempts?: number;
+  durationMs?: number;
+  error?: string;
+  details?: Record<string, unknown>;
 }
 
-export interface ArtifactsCreateRepoOptions {
-  description?: string;
-  readOnly?: boolean;
-  setDefaultBranch?: string;
+export interface SessionReadyEvent {
+  type: "session_ready";
+  sessionId: string;
+  terminalUrl: string;
+  streamUrl: string;
+  status: "idle";
+  repo: { owner: string; name: string };
+  branch: string;
 }
 
-export interface ArtifactsCreateRepoResult {
-  name: string;
-  remote: string;
-  defaultBranch: string;
-  token: string;
-}
-
-export interface ArtifactsRepo extends ArtifactsCreateRepoResult {
-  id: string;
-  createToken(scope?: "read" | "write", ttl?: number): Promise<ArtifactsCreateTokenResult>;
-  listTokens(): Promise<ArtifactsTokenListResult>;
-  revokeToken(tokenOrId: string): Promise<boolean>;
-  fork(name: string, opts?: ArtifactsForkOptions): Promise<ArtifactsCreateRepoResult>;
-}
-
-export interface ArtifactsCreateTokenResult {
-  plaintext: string;
-  expiresAt: string;
-}
-
-export interface ArtifactsTokenListResult {
-  total: number;
-  tokens: Array<{ id: string; scope: string; expiresAt: string }>;
-}
-
-export interface ArtifactsForkOptions {
-  description?: string;
-  readOnly?: boolean;
-  defaultBranchOnly?: boolean;
-}
-
-export interface ArtifactsRepoListResult {
-  repos: Array<{ name: string; status: "ready" | "importing" | "forking" }>;
-  cursor?: string;
-}
-
-export interface ArtifactsImportParams {
-  source: {
-    url: string;
-    branch?: string;
-    depth?: number;
-  };
-  target: {
-    name: string;
-    opts?: ArtifactsCreateRepoOptions;
-  };
-}
-
-// Sandbox types (from @cloudflare/sandbox)
-export interface SandboxInstance {
-  id: string;
-  exec(command: string, args?: string[], opts?: SandboxExecOptions): Promise<SandboxExecResult>;
-  execStream(command: string, args?: string[], opts?: SandboxExecOptions): Promise<ReadableStream>;
-  writeFile(path: string, content: string): Promise<void>;
-  readFile(path: string): Promise<string>;
-  setKeepAlive(keepAlive: boolean): Promise<void>;
-  destroy(): Promise<void>;
-  terminal(request: Request, options?: { cols?: number; rows?: number }): Promise<Response>;
-}
-
-export interface SandboxExecOptions {
-  cwd?: string;
-  env?: Record<string, string | undefined>;
-  stdin?: string;
-  timeout?: number;
-}
-
-export interface SandboxExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  success: boolean;
+export interface SessionErrorEvent {
+  type: "session_error";
+  sessionId: string;
+  error: string;
+  failedStep: string;
 }

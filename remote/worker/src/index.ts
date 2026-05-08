@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
+import { Sandbox } from "@cloudflare/sandbox";
+import { WarmPool } from "@cloudflare/sandbox/bridge";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -18,6 +20,7 @@ import {
   getUserDailyUsage,
 } from "./telemetry.js";
 import { INDEX_HTML } from "./static.js";
+import { XTERM_JS, XTERM_CSS } from "./vendor/xterm/bundle.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -26,13 +29,26 @@ app.get("/", async (c) => {
   return c.html(INDEX_HTML);
 });
 
+// ── Serve vendored xterm.js (self-hosted, no CDN) ───────────────────
+app.get("/xterm.js", (c) => {
+  c.header("Content-Type", "application/javascript; charset=utf-8");
+  c.header("Cache-Control", "public, max-age=86400");
+  return c.body(XTERM_JS);
+});
+
+app.get("/xterm.css", (c) => {
+  c.header("Content-Type", "text/css; charset=utf-8");
+  c.header("Cache-Control", "public, max-age=86400");
+  return c.body(XTERM_CSS);
+});
+
 // ── CORS for web frontend ───────────────────────────────────────────
 app.use("/api/*", async (c, next) => {
   c.header("Access-Control-Allow-Origin", c.req.header("Origin") ?? "https://commute.kimiflare.com");
   c.header("Access-Control-Allow-Credentials", "true");
   c.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (c.req.method === "OPTIONS") return c.text("", 204);
+  if (c.req.method === "OPTIONS") return c.body(null, 204);
   await next();
 });
 
@@ -41,7 +57,7 @@ app.use("/auth/*", async (c, next) => {
   c.header("Access-Control-Allow-Credentials", "true");
   c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   c.header("Access-Control-Allow-Headers", "Content-Type");
-  if (c.req.method === "OPTIONS") return c.text("", 204);
+  if (c.req.method === "OPTIONS") return c.body(null, 204);
   await next();
 });
 
@@ -184,17 +200,32 @@ app.post("/api/sessions", async (c) => {
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
 
-  const res = await doStub.fetch(new Request("http://internal/start", {
-    method: "POST",
-    body: JSON.stringify({
-      ...body,
-      githubToken: auth.token,
-      userId: auth.userId,
-    }),
-    headers: { "Content-Type": "application/json" },
-  }));
+  let res: Response;
+  try {
+    res = await doStub.fetch(new Request("http://internal/start", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        githubToken: auth.token,
+        userId: auth.userId,
+      }),
+      headers: { "Content-Type": "application/json" },
+    }));
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "Session DO unreachable" }, 500);
+  }
 
-  const data = await res.json();
+  if (!res.ok) {
+    const text = await res.text().catch(() => "Session start failed");
+    return c.json({ error: text }, res.status as 500);
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = (await res.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid response from session worker" }, 500);
+  }
   return c.json({ ...data, sessionId });
 });
 
@@ -306,7 +337,7 @@ app.post("/remote/start", async (c) => {
     headers: { "Content-Type": "application/json" },
   }));
 
-  const data = await res.json();
+  const data = (await res.json()) as Record<string, unknown>;
   return c.json({ ...data, sessionId });
 });
 
@@ -373,4 +404,4 @@ app.post("/relay", async (c) => {
 app.get("/health", (c) => c.json({ ok: true }));
 
 export default app;
-export { SessionDO };
+export { SessionDO, Sandbox, WarmPool };

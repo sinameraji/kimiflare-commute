@@ -1,4 +1,4 @@
-import type { D1Database } from "./types.js";
+/// <reference types="@cloudflare/workers-types" />
 
 export interface SessionRecord {
   id: string;

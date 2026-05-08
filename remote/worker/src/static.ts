@@ -1,1 +1,207 @@
-export const INDEX_HTML = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">\n  <title>commute.kimiflare.com</title>\n  <link rel=\"stylesheet\" href=\"/xterm.css\">\n  <style>\n    * { box-sizing: border-box; margin: 0; padding: 0; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n      background: #000;\n      color: #fff;\n      height: 100vh;\n      display: flex;\n      flex-direction: column;\n      overflow: hidden;\n    }\n    #app { flex: 1; display: flex; flex-direction: column; }\n    .landing {\n      display: flex;\n      flex-direction: column;\n      align-items: center;\n      justify-content: center;\n      flex: 1;\n      padding: 2rem;\n      text-align: center;\n    }\n    .landing h1 { font-size: 2rem; font-weight: 600; margin-bottom: 0.5rem; }\n    .landing p { color: #888; margin-bottom: 2rem; font-size: 1rem; }\n    .btn {\n      display: inline-flex; align-items: center; gap: 0.5rem;\n      padding: 0.75rem 1.5rem; border-radius: 6px; border: 1px solid #fff;\n      background: #000; color: #fff; font-size: 1rem; font-weight: 500;\n      cursor: pointer; transition: all 0.2s;\n    }\n    .btn:hover { background: #fff; color: #000; }\n    .btn:disabled { opacity: 0.4; cursor: not-allowed; border-color: #444; color: #444; }\n    .repo-picker {\n      flex: 1; display: flex; flex-direction: column;\n      padding: 1rem; max-width: 640px; width: 100%; margin: 0 auto;\n    }\n    .repo-picker h2 { font-size: 1.25rem; margin-bottom: 1rem; }\n    .search-box {\n      width: 100%; padding: 0.75rem 1rem; border-radius: 6px;\n      border: 1px solid #333; background: #111; color: #fff;\n      font-size: 1rem; margin-bottom: 1rem;\n    }\n    .search-box:focus { outline: none; border-color: #fff; }\n    .repo-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }\n    .repo-item {\n      padding: 0.875rem 1rem; border-radius: 6px; cursor: pointer;\n      transition: background 0.15s; border-bottom: 1px solid #1a1a1a;\n    }\n    .repo-item:hover { background: #111; }\n    .repo-item .name { font-weight: 500; }\n    .repo-item .meta { font-size: 0.8125rem; color: #666; margin-top: 0.25rem; }\n    .repo-item .private-badge {\n      display: inline-block; padding: 0.125rem 0.375rem; border-radius: 4px;\n      background: #333; color: #fff; font-size: 0.6875rem; margin-left: 0.5rem;\n    }\n    .session-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }\n    .session-item {\n      padding: 0.875rem 1rem; border-radius: 6px; cursor: pointer;\n      transition: background 0.15s; border-bottom: 1px solid #1a1a1a;\n      display: flex; align-items: center; gap: 0.75rem;\n    }\n    .session-item:hover { background: #111; }\n    .session-info { flex: 1; }\n    .session-info .prompt { font-weight: 500; font-size: 0.9375rem; }\n    .session-info .meta { font-size: 0.8125rem; color: #666; }\n    .log-view {\n      flex: 1; display: flex; flex-direction: column;\n      padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto;\n    }\n    .log-header {\n      display: flex; align-items: center; justify-content: space-between;\n      margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #222;\n    }\n    .log-header h2 { font-size: 1rem; font-weight: 500; }\n    .log-header .repo { color: #888; font-size: 0.875rem; }\n    .log-list { flex: 1; overflow-y: auto; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; }\n    .log-step {\n      border-bottom: 1px solid #111; cursor: pointer; transition: background 0.1s;\n    }\n    .log-step:hover { background: #0a0a0a; }\n    .log-step-header {\n      display: flex; align-items: center; gap: 0.75rem;\n      padding: 0.625rem 0.5rem;\n    }\n    .step-dot {\n      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;\n      background: #333; transition: background 0.3s;\n    }\n    .step-dot.pending { background: #333; }\n    .step-dot.running { background: #f5a623; animation: pulse 1.2s infinite; }\n    .step-dot.success { background: #3fb950; }\n    .step-dot.error { background: #f85149; }\n    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }\n    .step-label { flex: 1; font-size: 0.875rem; }\n    .step-status { font-size: 0.75rem; color: #666; }\n    .step-detail {\n      padding: 0.5rem 0.5rem 0.75rem 2rem;\n      font-size: 0.8125rem; color: #888; line-height: 1.5;\n      white-space: pre-wrap; word-break: break-word;\n      display: none;\n    }\n    .log-step.expanded .step-detail { display: block; }\n    .log-step.expanded { background: #0a0a0a; }\n    .terminal-container {\n      flex: 1; display: flex; flex-direction: column; position: relative;\n    }\n    .terminal-header {\n      display: flex; align-items: center; justify-content: space-between;\n      padding: 0.5rem 1rem; background: #111; border-bottom: 1px solid #222;\n      font-size: 0.875rem;\n    }\n    .terminal-header .repo { color: #888; }\n    #terminal { flex: 1; padding: 0.5rem; }\n    .terminal-toolbar {\n      display: flex; gap: 0.5rem; padding: 0.5rem;\n      background: #111; border-top: 1px solid #222; overflow-x: auto;\n    }\n    .toolbar-btn {\n      padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #333;\n      background: #000; color: #fff; font-size: 0.875rem; cursor: pointer;\n    }\n    .toolbar-btn:hover { background: #111; }\n    .connect-banner {\n      padding: 1rem; text-align: center; border-bottom: 1px solid #222;\n    }\n    .connect-banner .btn { width: 100%; max-width: 300px; }\n  </style>\n</head>\n<body>\n  <div id=\"app\"></div>\n  <script type=\"module\">\n    const API_BASE = '';\n    let currentUser = null;\n    let currentSession = null;\n    let terminal = null;\n    let terminalAddon = null;\n    let eventSource = null;\n\n    const STEPS = [\n      { id: 'api_call', label: 'POST /api/sessions' },\n      { id: 'd1_create', label: 'Create session record in D1' },\n      { id: 'artifacts_import', label: 'Import repository to Artifacts' },\n      { id: 'artifacts_token', label: 'Create Artifacts write token' },\n      { id: 'sandbox_get', label: 'Get Sandbox DO stub' },\n      { id: 'sandbox_provision', label: 'Provision container' },\n      { id: 'git_config', label: 'Write git config' },\n      { id: 'git_clone', label: 'Clone repository from Artifacts' },\n      { id: 'git_remote', label: 'Add GitHub remote' },\n      { id: 'git_branch', label: 'Create and checkout branch' },\n      { id: 'session_ready', label: 'Session ready' },\n    ];\n\n    function renderLanding() {\n      app.innerHTML = '<div class=\"landing\"><h1>commute</h1><p>KimiFlare on your phone. Anywhere.</p><button class=\"btn\" id=\"login-btn\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z\"/></svg>Log in with GitHub</button></div>';\n      document.getElementById('login-btn').addEventListener('click', () => { window.location.href = '/auth/github'; });\n    }\n\n    async function renderHome() {\n      app.innerHTML = '<div class=\"repo-picker\"><div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;\"><h2>' + currentUser.login + '</h2><button class=\"btn\" id=\"logout-btn\" style=\"padding:0.5rem 1rem;font-size:0.875rem;\">Log out</button></div><input type=\"text\" class=\"search-box\" id=\"repo-search\" placeholder=\"Search repositories...\"><div class=\"repo-list\" id=\"repo-list\"></div><div style=\"margin-top:1rem;padding-top:1rem;border-top:1px solid #1a1a1a;\"><h3 style=\"font-size:0.875rem;margin-bottom:0.75rem;color:#666;\">Recent sessions</h3><div class=\"session-list\" id=\"session-list\"></div></div></div>';\n      document.getElementById('logout-btn').addEventListener('click', async () => { await fetch('/auth/logout', { method: 'POST', credentials: 'include' }); currentUser = null; renderLanding(); });\n      const repoList = document.getElementById('repo-list');\n      const searchInput = document.getElementById('repo-search');\n      let allRepos = [];\n      try { const res = await fetch('/api/repos', { credentials: 'include' }); const data = await res.json(); allRepos = data.repos ?? []; renderRepos(allRepos); } catch (err) { repoList.innerHTML = '<div style=\"padding:1rem;color:#f85149;\">Failed to load repos</div>'; }\n      searchInput.addEventListener('input', (e) => { const q = e.target.value.toLowerCase(); renderRepos(allRepos.filter((r) => r.full_name.toLowerCase().includes(q))); });\n      function renderRepos(repos) {\n        repoList.innerHTML = repos.map((r) => '<div class=\"repo-item\" data-owner=\"' + r.owner.login + '\" data-name=\"' + r.name + '\"><div class=\"name\">' + r.full_name + (r.private ? '<span class=\"private-badge\">Private</span>' : '') + '</div><div class=\"meta\">' + (r.description || 'No description') + ' \\u00b7 \\u2b50 ' + (r.stargazers_count ?? 0) + '</div></div>').join('');\n        repoList.querySelectorAll('.repo-item').forEach((el) => { el.addEventListener('click', () => { const owner = el.dataset.owner; const name = el.dataset.name; const p = prompt('What should KimiFlare do in ' + owner + '/' + name + '?'); if (p) startSession(owner, name, p); }); });\n      }\n      try { const res = await fetch('/api/sessions', { credentials: 'include' }); const data = await res.json(); const sessions = data.sessions ?? []; const list = document.getElementById('session-list'); if (sessions.length === 0) { list.innerHTML = '<div style=\"padding:0.5rem;color:#444;font-size:0.875rem;\">No sessions yet</div>'; } else { list.innerHTML = sessions.slice(0, 10).map((s) => '<div class=\"session-item\" data-id=\"' + s.id + '\"><div class=\"session-info\"><div class=\"prompt\">' + s.prompt.slice(0, 60) + (s.prompt.length > 60 ? '...' : '') + '</div><div class=\"meta\">' + s.repo_owner + '/' + s.repo_name + ' \\u00b7 ' + s.status + '</div></div></div>').join(''); list.querySelectorAll('.session-item').forEach((el) => { el.addEventListener('click', () => loadSession(el.dataset.id)); }); } } catch { document.getElementById('session-list').innerHTML = '<div style=\"padding:0.5rem;color:#444;font-size:0.875rem;\">Failed to load sessions</div>'; }\n    }\n\n    async function startSession(owner, name, prompt) {\n      const repo = { owner, name };\n      renderLogView(repo, prompt);\n      updateStep('api_call', 'running', 'Sending request...');\n      let streamUrl, terminalUrl;\n      try {\n        const res = await fetch('/api/sessions', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, repo }) });\n        const data = await res.json();\n        if (!res.ok) { updateStep('api_call', 'error', 'HTTP ' + res.status, data.error || 'Unknown error'); return; }\n        updateStep('api_call', 'success', 'HTTP ' + res.status + ' \\u2014 session ' + data.sessionId.slice(0, 8) + '...');\n        streamUrl = data.streamUrl; terminalUrl = data.terminalUrl;\n      } catch (err) { updateStep('api_call', 'error', 'Network error', err.message); return; }\n      connectEventSource(streamUrl, terminalUrl);\n    }\n\n    function renderLogView(repo, prompt) {\n      app.innerHTML = '<div class=\"log-view\"><div class=\"log-header\"><div><h2>' + repo.owner + '/' + repo.name + '</h2><div class=\"repo\">' + prompt.slice(0, 80) + (prompt.length > 80 ? '...' : '') + '</div></div><button class=\"btn\" id=\"back-btn\" style=\"padding:0.5rem 1rem;font-size:0.875rem;\">Back</button></div><div class=\"log-list\" id=\"log-list\">' + STEPS.map((s) => '<div class=\"log-step\" data-step=\"' + s.id + '\" id=\"step-' + s.id + '\"><div class=\"log-step-header\"><div class=\"step-dot pending\" id=\"dot-' + s.id + '\"></div><div class=\"step-label\" id=\"label-' + s.id + '\">' + s.label + '</div><div class=\"step-status\" id=\"status-' + s.id + '\">pending</div></div><div class=\"step-detail\" id=\"detail-' + s.id + '\"></div></div>').join('') + '</div><div id=\"connect-area\"></div></div>';\n      document.getElementById('back-btn').addEventListener('click', () => { if (eventSource) { eventSource.close(); eventSource = null; } renderHome(); });\n      document.querySelectorAll('.log-step').forEach((el) => { el.addEventListener('click', (e) => { if (e.target.closest('.step-detail')) return; el.classList.toggle('expanded'); }); });\n    }\n\n    function updateStep(stepId, status, message, detail) {\n      const dot = document.getElementById('dot-' + stepId);\n      const label = document.getElementById('label-' + stepId);\n      const statusEl = document.getElementById('status-' + stepId);\n      const detailEl = document.getElementById('detail-' + stepId);\n      if (!dot || !label || !statusEl) return;\n      dot.className = 'step-dot ' + status;\n      label.textContent = message;\n      statusEl.textContent = status;\n      if (detail) { detailEl.textContent = typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2); document.getElementById('step-' + stepId)?.classList.add('expanded'); }\n    }\n\n    function connectEventSource(streamUrl, terminalUrl) {\n      if (eventSource) eventSource.close();\n      eventSource = new EventSource(API_BASE + streamUrl);\n      eventSource.onmessage = (e) => {\n        let data;\n        try { data = JSON.parse(e.data); } catch { return; }\n        if (data.type === 'step') {\n          updateStep(data.step, data.status, data.message, data.detail);\n          if (data.attempt && data.maxAttempts) { const statusEl = document.getElementById('status-' + data.step); if (statusEl) statusEl.textContent = 'attempt ' + data.attempt + '/' + data.maxAttempts; }\n          if (data.status === 'success' && data.durationMs) { const statusEl = document.getElementById('status-' + data.step); if (statusEl) statusEl.textContent = data.durationMs + 'ms'; }\n        }\n        if (data.type === 'step' && data.step === 'session_ready' && data.status === 'success') { showConnectButton(terminalUrl); }\n      };\n      eventSource.onerror = () => {};\n    }\n\n    function showConnectButton(terminalUrl) {\n      const area = document.getElementById('connect-area');\n      if (!area) return;\n      area.innerHTML = '<div class=\"connect-banner\"><button class=\"btn\" id=\"connect-btn\">Connect to terminal</button></div>';\n      document.getElementById('connect-btn').addEventListener('click', () => { renderTerminal(currentSession?.repo || { owner: '?', name: '?' }, terminalUrl); });\n    }\n\n    async function loadSession(sessionId) {\n      try {\n        const res = await fetch('/api/sessions/' + sessionId, { credentials: 'include' });\n        const data = await res.json();\n        if (data.error) return;\n        currentSession = data;\n        if (data.status === 'idle' || data.status === 'running') {\n          renderLogView(data.repo, data.prompt);\n          connectEventSource(data.streamUrl || '/api/sessions/' + sessionId + '/stream', data.terminalUrl || '/api/sessions/' + sessionId + '/terminal');\n        } else {\n          renderTerminal(data.repo, '/api/sessions/' + sessionId + '/terminal');\n        }\n      } catch {}\n    }\n\n    async function renderTerminal(repo, terminalUrl) {\n      app.innerHTML = '<div class=\"terminal-container\"><div class=\"terminal-header\"><span class=\"repo\">' + repo.owner + '/' + repo.name + '</span><span class=\"status\" id=\"term-status\">Connecting...</span></div><div id=\"terminal\"></div><div class=\"terminal-toolbar\"><button class=\"toolbar-btn\" id=\"btn-done\">Done</button><button class=\"toolbar-btn\" id=\"btn-cancel\">Cancel</button><button class=\"toolbar-btn\" id=\"btn-back\">Back</button></div></div>';\n      const { Terminal } = await import('/xterm.js');\n      const { FitAddon } = await import('/xterm-addon-fit.js');\n      terminal = new Terminal({ fontSize: 14, fontFamily: 'monospace', theme: { background: '#000', foreground: '#fff' } });\n      terminalAddon = new FitAddon();\n      terminal.loadAddon(terminalAddon);\n      terminal.open(document.getElementById('terminal'));\n      terminalAddon.fit();\n      const ws = new WebSocket('wss://' + location.host + terminalUrl);\n      ws.onopen = () => { document.getElementById('term-status').textContent = 'Connected'; };\n      ws.onclose = () => { document.getElementById('term-status').textContent = 'Disconnected'; };\n      ws.onerror = () => { document.getElementById('term-status').textContent = 'Error'; };\n      ws.onmessage = (e) => { if (typeof e.data === 'string') terminal.write(e.data); else { const reader = new FileReader(); reader.onload = () => terminal.write(reader.result); reader.readAsText(e.data); } };\n      terminal.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });\n      document.getElementById('btn-done').addEventListener('click', async () => { await fetch('/api/sessions/' + (currentSession?.sessionId || '') + '/finalize', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ summary: 'Done via UI', commitCount: 0 }) }); ws.close(); renderHome(); });\n      document.getElementById('btn-cancel').addEventListener('click', async () => { await fetch('/api/sessions/' + (currentSession?.sessionId || '') + '/cancel', { method: 'POST', credentials: 'include' }); ws.close(); renderHome(); });\n      document.getElementById('btn-back').addEventListener('click', () => { ws.close(); renderHome(); });\n    }\n\n    (async () => {\n      try {\n        const res = await fetch('/api/me', { credentials: 'include' });\n        if (res.ok) { currentUser = await res.json(); renderHome(); }\n        else { renderLanding(); }\n      } catch { renderLanding(); }\n    })();\n  </script>\n</body>\n</html>\n";
+export const INDEX_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>commute.kimiflare.com</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #app { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; }
+    .screen { display: none; width: 100%; max-width: 640px; }
+    .screen.active { display: flex; flex-direction: column; }
+    h1 { font-size: 1.75rem; font-weight: 600; margin-bottom: 0.5rem; text-align: center; }
+    p { color: #8b949e; margin-bottom: 1.5rem; text-align: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.75rem 1.5rem; border-radius: 6px; border: 1px solid #c9d1d9;
+      background: #0d1117; color: #c9d1d9; font-size: 1rem; font-weight: 500;
+      cursor: pointer; transition: all 0.2s; text-decoration: none;
+    }
+    .btn:hover { background: #c9d1d9; color: #0d1117; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; border-color: #30363d; color: #484f58; }
+    .search-box {
+      width: 100%; padding: 0.75rem 1rem; border-radius: 6px;
+      border: 1px solid #30363d; background: #161b22; color: #c9d1d9;
+      font-size: 1rem; margin-bottom: 1rem;
+    }
+    .search-box:focus { outline: none; border-color: #58a6ff; }
+    .repo-list { flex: 1; overflow-y: auto; max-height: 60vh; }
+    .repo-item {
+      padding: 0.75rem 1rem; border-radius: 6px; cursor: pointer;
+      transition: background 0.15s; border-bottom: 1px solid #21262d;
+    }
+    .repo-item:hover { background: #161b22; }
+    .repo-item .name { font-weight: 500; }
+    .repo-item .meta { font-size: 0.8125rem; color: #8b949e; margin-top: 0.25rem; }
+    .repo-item .private-badge {
+      display: inline-block; padding: 0.125rem 0.375rem; border-radius: 4px;
+      background: #30363d; color: #c9d1d9; font-size: 0.6875rem; margin-left: 0.5rem;
+    }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    .header h2 { font-size: 1.25rem; }
+    .logout { font-size: 0.875rem; color: #8b949e; cursor: pointer; background: none; border: none; }
+    .logout:hover { color: #f85149; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; margin: 2rem auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .result-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin-top: 1rem; }
+    .result-box pre { font-family: 'SF Mono', Monaco, monospace; font-size: 0.875rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #c9d1d9; }
+    .error { color: #f85149; text-align: center; }
+    .success { color: #3fb950; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    const app = document.getElementById('app');
+    let currentUser = null;
+    let allRepos = [];
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    async function init() {
+      try {
+        const res = await fetch('/api/me', { credentials: 'include' });
+        if (res.ok) {
+          currentUser = await res.json();
+          renderRepoPicker();
+        } else {
+          renderLanding();
+        }
+      } catch {
+        renderLanding();
+      }
+    }
+
+    function renderLanding() {
+      app.innerHTML = \`
+        <div id="landing" class="screen active">
+          <h1>commute</h1>
+          <p>KimiFlare in the browser. Pick a repo, get a sandbox.</p>
+          <a class="btn" href="/auth/github">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            Log in with GitHub
+          </a>
+        </div>
+      \`;
+    }
+
+    async function renderRepoPicker() {
+      app.innerHTML = \`
+        <div id="repos" class="screen active">
+          <div class="header">
+            <h2>\${currentUser.login}</h2>
+            <button class="logout" onclick="logout()">Log out</button>
+          </div>
+          <input type="text" class="search-box" id="repo-search" placeholder="Search repositories...">
+          <div class="repo-list" id="repo-list"><div class="spinner"></div></div>
+        </div>
+      \`;
+
+      try {
+        const res = await fetch('/api/repos', { credentials: 'include' });
+        const data = await res.json();
+        allRepos = data.repos ?? [];
+        renderRepoList(allRepos);
+      } catch (err) {
+        document.getElementById('repo-list').innerHTML = '<div class="error">Failed to load repos</div>';
+      }
+
+      document.getElementById('repo-search').addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        renderRepoList(allRepos.filter(r => r.full_name.toLowerCase().includes(q)));
+      });
+    }
+
+    function renderRepoList(repos) {
+      const list = document.getElementById('repo-list');
+      if (repos.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:#8b949e;padding:2rem;">No repos found</div>';
+        return;
+      }
+      list.innerHTML = repos.map(r => \`
+        <div class="repo-item" data-owner="\${r.owner.login}" data-name="\${r.name}">
+          <div class="name">\${r.full_name}\${r.private ? '<span class="private-badge">Private</span>' : ''}</div>
+          <div class="meta">\${r.description || 'No description'}</div>
+        </div>
+      \`).join('');
+      list.querySelectorAll('.repo-item').forEach(el => {
+        el.addEventListener('click', () => setupRepo(el.dataset.owner, el.dataset.name));
+      });
+    }
+
+    async function setupRepo(owner, name) {
+      app.innerHTML = \`
+        <div id="setup" class="screen active">
+          <h1>Setting up...</h1>
+          <p>Cloning <strong>\${owner}/\${name}</strong> into a Cloudflare Sandbox.</p>
+          <div class="spinner"></div>
+        </div>
+      \`;
+
+      try {
+        const res = await fetch('/api/setup', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ owner, name }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          app.innerHTML = \`
+            <div id="result" class="screen active">
+              <h1 class="success">Connected to \${owner}/\${name}</h1>
+              <p>Sandbox is ready. Here's the latest commit history:</p>
+              <div class="result-box"><pre>\${escapeHtml(data.output || '(no output)')}</pre></div>
+              <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Pick another repo</button>
+            </div>
+          \`;
+        } else {
+          app.innerHTML = \`
+            <div id="result" class="screen active">
+              <h1 class="error">Setup failed</h1>
+              <p>\${escapeHtml(data.error || 'Unknown error')}</p>
+              <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Try again</button>
+            </div>
+          \`;
+        }
+      } catch (err) {
+        app.innerHTML = \`
+          <div id="result" class="screen active">
+            <h1 class="error">Setup failed</h1>
+            <p>\${escapeHtml(err.message)}</p>
+            <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Try again</button>
+          </div>
+        \`;
+      }
+    }
+
+    async function logout() {
+      await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
+      currentUser = null;
+      allRepos = [];
+      renderLanding();
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    init();
+  </script>
+</body>
+</html>`;

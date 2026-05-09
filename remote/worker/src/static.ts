@@ -183,8 +183,8 @@ export const INDEX_HTML = `<!DOCTYPE html>
     }
 
     const STEP_ORDER = [
-      { key: 'import', label: 'Importing repository into Artifacts' },
-      { key: 'token', label: 'Creating write token' },
+      { key: 'import', label: 'Preparing repository' },
+      { key: 'token', label: 'Authenticating with repository' },
       { key: 'sandbox', label: 'Starting Cloudflare Sandbox' },
       { key: 'clone', label: 'Cloning repository into sandbox' },
       { key: 'verify', label: 'Verifying repository' },

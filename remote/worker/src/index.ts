@@ -3,7 +3,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
-import { Sandbox } from "./sandbox-wrapper.js";
+import { Sandbox, proxyTerminal } from "@cloudflare/sandbox";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -210,14 +210,9 @@ app.get("/ws/:sessionId", async (c) => {
 
   const sandboxId = c.env.SANDBOX.idFromName(sessionId);
   const sandbox = c.env.SANDBOX.get(sandboxId);
+  const containerSessionId = `sandbox-${sessionId}`;
 
-  const url = new URL(c.req.url);
-  url.pathname = "/ws/pty";
-  url.searchParams.set("cols", String(cols));
-  url.searchParams.set("rows", String(rows));
-
-  const proxyRequest = new Request(url, c.req.raw);
-  return sandbox.fetch(proxyRequest);
+  return proxyTerminal(sandbox, containerSessionId, c.req.raw, { cols, rows });
 });
 
 // ── Health check ────────────────────────────────────────────────────

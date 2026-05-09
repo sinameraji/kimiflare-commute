@@ -188,7 +188,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
       { key: 'sandbox', label: 'Starting Cloudflare Sandbox' },
       { key: 'clone', label: 'Cloning repository into sandbox' },
       { key: 'verify', label: 'Verifying repository' },
-      { key: 'install', label: 'Installing KimiFleur' },
+      { key: 'install', label: 'Installing KimiFlare' },
       { key: 'config', label: 'Configuring Cloudflare credentials' },
       { key: 'finalize', label: 'Finalizing session' },
     ];

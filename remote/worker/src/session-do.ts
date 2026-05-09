@@ -78,7 +78,7 @@ export class SessionDO implements DurableObject {
       sandbox: "Starting Cloudflare Sandbox",
       clone: "Cloning repository into sandbox",
       verify: "Verifying repository",
-      install: "Installing KimiFleur",
+      install: "Installing KimiFlare",
       config: "Configuring Cloudflare credentials",
       finalize: "Finalizing session",
     };
@@ -213,7 +213,7 @@ export class SessionDO implements DurableObject {
         throw err;
       }
 
-      // ── Step 6: Install KimiFleur globally ──────────────────────────
+      // ── Step 6: Install KimiFlare globally ──────────────────────────
       await setProgress("install", "running", STEP_LABELS.install);
       log("Step 6 — npm install -g kimiflare");
       try {
@@ -228,9 +228,9 @@ export class SessionDO implements DurableObject {
         await setProgress("install", "complete"); // non-fatal
       }
 
-      // ── Step 7: Write KimiFleur config with Cloudflare credentials ──
+      // ── Step 7: Write KimiFlare config with Cloudflare credentials ──
       await setProgress("config", "running", STEP_LABELS.config);
-      log("Step 7 — write KimiFleur config");
+      log("Step 7 — write KimiFlare config");
       try {
         await sandbox.exec("mkdir -p /root/.config/kimiflare");
         const config = JSON.stringify({

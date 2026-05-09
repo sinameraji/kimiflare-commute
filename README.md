@@ -1,4 +1,4 @@
-# KimiFlare Web
+# Commute
 
 Browser-based terminal for [KimiFlare](https://github.com/sinameraji/kimiflare), orchestrated by Cloudflare Workers and executing in Cloudflare Sandbox.
 

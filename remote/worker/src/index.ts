@@ -2,8 +2,8 @@ import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
-import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
+import { KimiSandbox } from "./sandbox-wrapper.js";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -203,15 +203,25 @@ app.get("/ws/:sessionId", async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
 
-  // Connect to the sandbox PTY
-  const sandbox = await getSandbox(c.env.SANDBOX, sessionId);
+  // Forward WebSocket upgrade to the Sandbox DO so the container PTY
+  // handshake happens inside the DO (required by the runtime).
   const cols = Number(c.req.query("cols") ?? "120");
   const rows = Number(c.req.query("rows") ?? "30");
-  return sandbox.terminal(c.req.raw, { cols, rows });
+
+  const sandboxId = c.env.SANDBOX.idFromName(sessionId);
+  const sandbox = c.env.SANDBOX.get(sandboxId);
+
+  const url = new URL(c.req.url);
+  url.pathname = "/ws/pty";
+  url.searchParams.set("cols", String(cols));
+  url.searchParams.set("rows", String(rows));
+
+  const proxyRequest = new Request(url, c.req.raw);
+  return sandbox.fetch(proxyRequest);
 });
 
 // ── Health check ────────────────────────────────────────────────────
 app.get("/health", (c) => c.json({ ok: true }));
 
 export default app;
-export { SessionDO, Sandbox, WarmPool };
+export { SessionDO, KimiSandbox, WarmPool };

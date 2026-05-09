@@ -165,9 +165,27 @@ export class SessionDO implements DurableObject {
           log("Step 1 — OK", artifact);
           await setProgress("import", "complete");
         } catch (err) {
-          log("Step 1 — FAIL", err instanceof Error ? err.message : String(err));
-          await setProgress("import", "error", STEP_LABELS.import, err instanceof Error ? err.message : String(err));
-          throw err;
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("already exists")) {
+            log("Step 1 — artifact already exists, deleting and re-importing", { name: sessionId });
+            appendLog("Artifact exists — refreshing...");
+            try {
+              await this.env.ARTIFACTS!.delete(sessionId);
+            } catch (delErr) {
+              log("Step 1 — delete warning", delErr instanceof Error ? delErr.message : String(delErr));
+            }
+            artifact = await this.env.ARTIFACTS!.import({
+              source: { url: githubUrl, branch: "main" },
+              target: { name: sessionId },
+            });
+            appendLog(`Artifact refreshed: ${artifact.name}`);
+            log("Step 1 — OK (refreshed)", artifact);
+            await setProgress("import", "complete");
+          } else {
+            log("Step 1 — FAIL", msg);
+            await setProgress("import", "error", STEP_LABELS.import, msg);
+            throw err;
+          }
         }
 
         // ── Step 2: Create a write token for the artifact ─────────────
@@ -198,8 +216,9 @@ export class SessionDO implements DurableObject {
       let sandbox: Awaited<ReturnType<typeof getSandbox>>;
       try {
         sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
-        appendLog(`Sandbox ready (id: ${(sandbox as any).id?.slice(0, 8)}...)`);
-        log("Step 3 — OK", { sandboxId: (sandbox as any).id });
+        const sandboxId = (sandbox as any).id ?? "unknown";
+        appendLog(`Sandbox ready (id: ${sandboxId})`);
+        log("Step 3 — OK", { sandboxId });
         await setProgress("sandbox", "complete");
       } catch (err) {
         log("Step 3 — FAIL", err instanceof Error ? err.message : String(err));

@@ -1,10 +1,19 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  KimiFlare Commute — Self-hosted Cloudflare Worker
+# ═══════════════════════════════════════════════════════════════════════
+#  1. Copy this file and update `name` to your preferred worker name.
+#  2. Run `wrangler kv:namespace create OAUTH_KV` and paste the id below.
+#  3. Set all secrets via `wrangler secret put <NAME>` (see README.md).
+#  4. Run `wrangler deploy`.
+# ═══════════════════════════════════════════════════════════════════════
+
 name = "kimiflare-commute"
 main = "src/index.ts"
 compatibility_date = "2025-05-06"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
-# Durable Objects
+# ── Durable Objects ───────────────────────────────────────────────────
 [[durable_objects.bindings]]
 name = "SESSION_DO"
 class_name = "SessionDO"
@@ -13,24 +22,32 @@ class_name = "SessionDO"
 name = "SANDBOX"
 class_name = "Sandbox"
 
-# Containers (Sandbox)
+# ── Containers (Cloudflare Sandbox) ───────────────────────────────────
+# Requires a Dockerfile in the same directory.
 [[containers]]
 class_name = "Sandbox"
 image = "./Dockerfile"
 instance_type = "basic"
 max_instances = 5
 
-# Artifacts binding
+# ── Artifacts (repo storage) ──────────────────────────────────────────
 [[artifacts]]
 binding = "ARTIFACTS"
 namespace = "default"
 
-# KV for OAuth state and session caching
+# ── KV Namespace (OAuth state + sessions) ─────────────────────────────
+# Create your own:  wrangler kv:namespace create OAUTH_KV
+# Then replace the id below with the one Wrangler prints.
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "4c23fe928c814a01b0384b58330eff3f"
 
-# Secrets (set via wrangler secret put)
-# GITHUB_OAUTH_CLIENT_ID
-# GITHUB_OAUTH_CLIENT_SECRET
-# ENCRYPTION_KEY
+# ── Secrets (set via `wrangler secret put <NAME>`) ───────────────────
+#   GITHUB_OAUTH_CLIENT_ID      - From your GitHub OAuth app
+#   GITHUB_OAUTH_CLIENT_SECRET  - From your GitHub OAuth app
+#   ENCRYPTION_KEY              - Random 32-byte base64 string
+#   ACCOUNT_ID                  - Your Cloudflare account ID
+#   CF_API_TOKEN                - Cloudflare API token with Workers AI:Read
+#   ALLOWED_GITHUB_IDS          - Optional: comma-separated GitHub user IDs
+#   ADMIN_GITHUB_ID             - Optional: admin GitHub user ID
+#   REMOTE_AUTH_SECRET          - Optional: for remote CLI auth

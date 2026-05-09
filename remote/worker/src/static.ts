@@ -4,6 +4,9 @@ export const INDEX_HTML = `<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>commute.kimiflare.com</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -56,6 +59,15 @@ export const INDEX_HTML = `<!DOCTYPE html>
     .result-box pre { font-family: 'SF Mono', Monaco, monospace; font-size: 0.875rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #c9d1d9; }
     .error { color: #f85149; text-align: center; }
     .success { color: #3fb950; text-align: center; }
+    #terminal-screen { max-width: none; width: 100%; height: 100vh; padding: 0; }
+    #terminal-screen .term-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.5rem 1rem; background: #161b22; border-bottom: 1px solid #30363d;
+    }
+    #terminal-screen .term-header span { font-size: 0.875rem; color: #8b949e; }
+    #terminal-screen .term-header button { font-size: 0.875rem; }
+    #terminal-container { flex: 1; padding: 0.5rem; }
+    .xterm { height: 100%; }
   </style>
 </head>
 <body>
@@ -160,14 +172,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
         const data = await res.json();
 
         if (data.success) {
-          app.innerHTML = \`
-            <div id="result" class="screen active">
-              <h1 class="success">Connected to \${owner}/\${name}</h1>
-              <p>Sandbox is ready. Here's the latest commit history:</p>
-              <div class="result-box"><pre>\${escapeHtml(data.output || '(no output)')}</pre></div>
-              <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Pick another repo</button>
-            </div>
-          \`;
+          renderTerminal(data.sessionId, owner, name);
         } else {
           app.innerHTML = \`
             <div id="result" class="screen active">
@@ -186,6 +191,73 @@ export const INDEX_HTML = `<!DOCTYPE html>
           </div>
         \`;
       }
+    }
+
+    function renderTerminal(sessionId, owner, name) {
+      app.innerHTML = \`
+        <div id="terminal-screen" class="screen active">
+          <div class="term-header">
+            <span>\${owner}/\${name}</span>
+            <button class="logout" onclick="renderRepoPicker()">Close</button>
+          </div>
+          <div id="terminal-container"></div>
+        </div>
+      \`;
+
+      const term = new Terminal({
+        fontFamily: "'SF Mono', Monaco, monospace",
+        fontSize: 14,
+        theme: { background: '#0d1117', foreground: '#c9d1d9', cursor: '#c9d1d9' },
+        cursorBlink: true,
+      });
+      const fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminal-container'));
+      fitAddon.fit();
+
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(\`\${protocol}//\${location.host}/ws/\${sessionId}?cols=\${term.cols}&rows=\${term.rows}\`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        term.writeln('\\r\\n\\x1b[32mConnected to sandbox.\\x1b[0m\\r\\n');
+      };
+
+      ws.onmessage = (e) => {
+        if (typeof e.data === 'string') {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'ready') term.writeln('\\x1b[32mReady.\\x1b[0m\\r\\n');
+          else if (msg.type === 'exit') term.writeln(\`\\x1b[31mExited (\${msg.code}).\\x1b[0m\\r\\n\`);
+          else if (msg.type === 'error') term.writeln(\`\\x1b[31mError: \${msg.message}\\x1b[0m\\r\\n\`);
+        } else {
+          const decoder = new TextDecoder();
+          term.write(decoder.decode(e.data));
+        }
+      };
+
+      ws.onclose = () => {
+        term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m\\r\\n');
+      };
+
+      ws.onerror = () => {
+        term.writeln('\\r\\n\\x1b[31mConnection error.\\x1b[0m\\r\\n');
+      };
+
+      term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(data));
+        }
+      });
+
+      term.onResize(({ cols, rows }) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        }
+      });
+
+      window.addEventListener('resize', () => {
+        fitAddon.fit();
+      });
     }
 
     async function logout() {

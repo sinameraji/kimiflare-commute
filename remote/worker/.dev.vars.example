@@ -1,0 +1,14 @@
+# Copy this file to .dev.vars and fill in your values for local development.
+# DO NOT commit .dev.vars to git — it is already in .gitignore.
+
+GITHUB_OAUTH_CLIENT_ID=your_github_oauth_client_id
+GITHUB_OAUTH_CLIENT_SECRET=your_github_oauth_client_secret
+ENCRYPTION_KEY=generate_with_openssl_rand_base64_32
+ACCOUNT_ID=your_cloudflare_account_id
+CF_API_TOKEN=your_cloudflare_api_token
+
+# Optional — restrict to specific GitHub user IDs (comma-separated numbers)
+# ALLOWED_GITHUB_IDS=12345678
+
+# Optional — admin GitHub user ID
+# ADMIN_GITHUB_ID=12345678

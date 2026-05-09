@@ -22,6 +22,22 @@ Run KimiFlare (Kimi-K2.6 coding agent) in a Cloudflare Sandbox, directly from yo
   wrangler login
   ```
 
+## Local development
+
+To run the worker locally before deploying:
+
+```bash
+cd remote/worker
+cp .dev.vars.example .dev.vars
+# Edit .dev.vars and fill in your secrets
+npm install
+npm run dev
+```
+
+Open `http://localhost:8787` in your browser.
+
+> **Note:** For local dev, Wrangler reads secrets from `.dev.vars` (not from the cloud secret store). The `.dev.vars` file is already in `.gitignore` so it won't be committed.
+
 ## Quick deploy
 
 ### 1. Clone this repo

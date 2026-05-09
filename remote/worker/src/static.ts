@@ -59,6 +59,22 @@ export const INDEX_HTML = `<!DOCTYPE html>
     .result-box pre { font-family: 'SF Mono', Monaco, monospace; font-size: 0.875rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #c9d1d9; }
     .error { color: #f85149; text-align: center; }
     .success { color: #3fb950; text-align: center; }
+    .progress-list { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
+    .progress-step {
+      display: flex; align-items: center; gap: 0.75rem;
+      padding: 0.625rem 1rem; border-radius: 6px;
+      background: #161b22; border: 1px solid #21262d;
+      font-size: 0.9375rem; color: #8b949e;
+      transition: all 0.3s ease;
+    }
+    .progress-step.completed { color: #3fb950; border-color: #238636; background: #0d1f0d; }
+    .progress-step.active { color: #c9d1d9; border-color: #58a6ff; background: #0d1f3d; }
+    .progress-step.error { color: #f85149; border-color: #da3633; background: #3d0d0d; }
+    .step-icon { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .step-icon svg { width: 16px; height: 16px; }
+    .step-spinner { width: 14px; height: 14px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; }
+    .step-label { flex: 1; }
+    .step-detail { font-size: 0.8125rem; color: #8b949e; margin-top: 0.25rem; }
     #terminal-screen { max-width: none; width: 100%; height: 100vh; padding: 0; }
     #terminal-screen .term-header {
       display: flex; justify-content: space-between; align-items: center;
@@ -77,21 +93,30 @@ export const INDEX_HTML = `<!DOCTYPE html>
     let currentUser = null;
     let allRepos = [];
 
+    function clog(label, data) {
+      console.log('[Client]', label, data);
+    }
+
     function showScreen(id) {
       document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
       document.getElementById(id).classList.add('active');
     }
 
     async function init() {
+      clog('init — checking /api/me');
       try {
         const res = await fetch('/api/me', { credentials: 'include' });
+        clog('init — /api/me response', { status: res.status, ok: res.ok });
         if (res.ok) {
           currentUser = await res.json();
+          clog('init — logged in', currentUser);
           renderRepoPicker();
         } else {
+          clog('init — not logged in');
           renderLanding();
         }
-      } catch {
+      } catch (err) {
+        clog('init — /api/me ERROR', err.message);
         renderLanding();
       }
     }
@@ -121,12 +146,16 @@ export const INDEX_HTML = `<!DOCTYPE html>
         </div>
       \`;
 
+      clog('renderRepoPicker — fetching /api/repos');
       try {
         const res = await fetch('/api/repos', { credentials: 'include' });
+        clog('renderRepoPicker — /api/repos response', { status: res.status, ok: res.ok });
         const data = await res.json();
+        clog('renderRepoPicker — /api/repos data', { repoCount: data.repos?.length, error: data.error });
         allRepos = data.repos ?? [];
         renderRepoList(allRepos);
       } catch (err) {
+        clog('renderRepoPicker — /api/repos ERROR', err.message);
         document.getElementById('repo-list').innerHTML = '<div class="error">Failed to load repos</div>';
       }
 
@@ -153,47 +182,141 @@ export const INDEX_HTML = `<!DOCTYPE html>
       });
     }
 
+    const STEP_ORDER = [
+      { key: 'import', label: 'Importing repository into Artifacts' },
+      { key: 'token', label: 'Creating write token' },
+      { key: 'sandbox', label: 'Starting Cloudflare Sandbox' },
+      { key: 'clone', label: 'Cloning repository into sandbox' },
+      { key: 'verify', label: 'Verifying repository' },
+      { key: 'install', label: 'Installing KimiFleur' },
+      { key: 'config', label: 'Configuring Cloudflare credentials' },
+      { key: 'finalize', label: 'Finalizing session' },
+    ];
+
+    function renderSetupProgress(completedSteps, activeStep, errorStep, errorMessage) {
+      const list = document.getElementById('progress-list');
+      if (!list) return;
+      list.innerHTML = STEP_ORDER.map((s, idx) => {
+        const isCompleted = completedSteps.includes(s.key);
+        const isActive = activeStep === s.key;
+        const isError = errorStep === s.key;
+        let icon;
+        if (isError) {
+          icon = '<svg viewBox="0 0 16 16" fill="#f85149"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>';
+        } else if (isCompleted) {
+          icon = '<svg viewBox="0 0 16 16" fill="#3fb950"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+        } else if (isActive) {
+          icon = '<div class="step-spinner"></div>';
+        } else {
+          icon = '<span style="width:14px;height:14px;border:2px solid #30363d;border-radius:50%;display:block;"></span>';
+        }
+        const cls = isError ? 'error' : isActive ? 'active' : isCompleted ? 'completed' : '';
+        return \`<div class="progress-step \${cls}"><div class="step-icon">\${icon}</div><div class="step-label">\${s.label}</div></div>\`;
+      }).join('');
+
+      const detail = document.getElementById('progress-detail');
+      if (detail) {
+        if (errorMessage) {
+          detail.innerHTML = \`<span class="error">\${escapeHtml(errorMessage)}</span>\`;
+        } else if (activeStep) {
+          const step = STEP_ORDER.find(s => s.key === activeStep);
+          detail.textContent = step ? step.label + '...' : '';
+        } else {
+          detail.textContent = '';
+        }
+      }
+    }
+
     async function setupRepo(owner, name) {
+      clog('setupRepo — starting', { owner, name });
       app.innerHTML = \`
         <div id="setup" class="screen active">
           <h1>Setting up...</h1>
           <p>Cloning <strong>\${owner}/\${name}</strong> into a Cloudflare Sandbox.</p>
-          <div class="spinner"></div>
+          <div id="progress-list" class="progress-list"></div>
+          <div id="progress-detail" class="step-detail" style="text-align:center;margin-top:1rem;"></div>
         </div>
       \`;
+      renderSetupProgress([], 'import', null, null);
 
+      let sessionId;
       try {
+        clog('setupRepo — POST /api/setup', { owner, name });
         const res = await fetch('/api/setup', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ owner, name }),
         });
-        const data = await res.json();
+        clog('setupRepo — /api/setup response', { status: res.status, ok: res.ok });
 
-        if (data.success) {
-          renderTerminal(data.sessionId, owner, name);
-        } else {
-          app.innerHTML = \`
-            <div id="result" class="screen active">
-              <h1 class="error">Setup failed</h1>
-              <p>\${escapeHtml(data.error || 'Unknown error')}</p>
-              <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Try again</button>
-            </div>
-          \`;
+        let data;
+        try {
+          data = await res.json();
+        } catch (parseErr) {
+          const text = await res.text();
+          clog('setupRepo — /api/setup JSON parse FAIL', { text: text.slice(0, 500) });
+          throw new Error('Server returned non-JSON: ' + text.slice(0, 200));
         }
+
+        clog('setupRepo — /api/setup data', data);
+
+        if (data.error) {
+          throw new Error(data.error);
+        }
+
+        sessionId = data.sessionId;
+        if (!sessionId) {
+          throw new Error('No sessionId returned from server');
+        }
+
+        // Poll progress until complete or error
+        const pollInterval = setInterval(async () => {
+          try {
+            const pres = await fetch(\`/api/setup/progress/\${sessionId}\`, { credentials: 'include' });
+            if (!pres.ok) return;
+            const progress = await pres.json();
+            clog('setupRepo — progress', progress);
+
+            renderSetupProgress(
+              progress.completedSteps || [],
+              progress.status === 'complete' ? null : progress.step,
+              progress.status === 'error' ? progress.step : null,
+              progress.error
+            );
+
+            if (progress.status === 'complete') {
+              clearInterval(pollInterval);
+              clog('setupRepo — SUCCESS', { sessionId });
+              renderTerminal(sessionId, owner, name);
+            } else if (progress.status === 'error') {
+              clearInterval(pollInterval);
+              throw new Error(progress.error || 'Setup failed');
+            }
+          } catch (pollErr) {
+            clog('setupRepo — poll error', pollErr.message);
+          }
+        }, 800);
+
+        // Safety timeout: stop polling after 5 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          clog('setupRepo — poll timeout');
+        }, 5 * 60 * 1000);
+
       } catch (err) {
-        app.innerHTML = \`
-          <div id="result" class="screen active">
-            <h1 class="error">Setup failed</h1>
-            <p>\${escapeHtml(err.message)}</p>
-            <button class="btn" onclick="renderRepoPicker()" style="margin-top:1.5rem;">Try again</button>
+        clog('setupRepo — ERROR', err.message);
+        renderSetupProgress([], null, 'import', err.message);
+        app.innerHTML += \`
+          <div style="text-align:center;margin-top:1.5rem;">
+            <button class="btn" onclick="renderRepoPicker()">Try again</button>
           </div>
         \`;
       }
     }
 
     function renderTerminal(sessionId, owner, name) {
+      clog('renderTerminal', { sessionId, owner, name });
       app.innerHTML = \`
         <div id="terminal-screen" class="screen active">
           <div class="term-header">
@@ -205,9 +328,9 @@ export const INDEX_HTML = `<!DOCTYPE html>
       \`;
 
       const term = new Terminal({
-        fontFamily: "'SF Mono', Monaco, monospace",
         fontSize: 14,
-        theme: { background: '#0d1117', foreground: '#c9d1d9', cursor: '#c9d1d9' },
+        fontFamily: '"SF Mono", Monaco, "Cascadia Code", monospace',
+        theme: { background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff' },
         cursorBlink: true,
       });
       const fitAddon = new FitAddon.FitAddon();
@@ -216,31 +339,39 @@ export const INDEX_HTML = `<!DOCTYPE html>
       fitAddon.fit();
 
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(\`\${protocol}//\${location.host}/ws/\${sessionId}?cols=\${term.cols}&rows=\${term.rows}\`);
+      const wsUrl = \`\${protocol}//\${location.host}/ws/\${sessionId}?cols=\${term.cols}&rows=\${term.rows}\`;
+      clog('renderTerminal — WebSocket URL', wsUrl);
+
+      const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        term.writeln('\\r\\n\\x1b[32mConnected to sandbox.\\x1b[0m\\r\\n');
+        clog('WebSocket — OPEN');
       };
 
       ws.onmessage = (e) => {
-        if (typeof e.data === 'string') {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'ready') term.writeln('\\x1b[32mReady.\\x1b[0m\\r\\n');
-          else if (msg.type === 'exit') term.writeln(\`\\x1b[31mExited (\${msg.code}).\\x1b[0m\\r\\n\`);
-          else if (msg.type === 'error') term.writeln(\`\\x1b[31mError: \${msg.message}\\x1b[0m\\r\\n\`);
+        if (e.data instanceof ArrayBuffer) {
+          term.write(new Uint8Array(e.data));
         } else {
-          const decoder = new TextDecoder();
-          term.write(decoder.decode(e.data));
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'resize') {
+              clog('WebSocket — resize msg', msg);
+            }
+          } catch {
+            term.write(e.data);
+          }
         }
       };
 
-      ws.onclose = () => {
-        term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m\\r\\n');
+      ws.onerror = (e) => {
+        clog('WebSocket — ERROR', e);
+        term.writeln('\\r\\n[Connection error]');
       };
 
-      ws.onerror = () => {
-        term.writeln('\\r\\n\\x1b[31mConnection error.\\x1b[0m\\r\\n');
+      ws.onclose = (e) => {
+        clog('WebSocket — CLOSE', { code: e.code, reason: e.reason, wasClean: e.wasClean });
+        term.writeln('\\r\\n[Connection closed]');
       };
 
       term.onData((data) => {
@@ -261,19 +392,22 @@ export const INDEX_HTML = `<!DOCTYPE html>
     }
 
     async function logout() {
+      clog('logout');
       await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
       currentUser = null;
-      allRepos = [];
       renderLanding();
     }
 
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
     }
 
     init();
   </script>
 </body>
-</html>`;
+</html>
+`;

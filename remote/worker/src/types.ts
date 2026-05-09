@@ -58,4 +58,5 @@ export interface SetupProgress {
   error?: string;
   sessionId?: string;
   output?: string;
+  logs?: string[];
 }

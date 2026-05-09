@@ -83,6 +83,8 @@ export class SessionDO implements DurableObject {
       finalize: "Finalizing session",
     };
 
+    const logs: string[] = [];
+
     const setProgress = (step: string, status: SetupProgress["status"], message?: string, error?: string) => {
       const stepIndex = STEPS.indexOf(step);
       const completedSteps = STEPS.slice(0, stepIndex).filter((s) => s !== step || status === "complete");
@@ -98,8 +100,14 @@ export class SessionDO implements DurableObject {
         completedSteps,
         error,
         sessionId,
+        logs: [...logs],
       };
       return this.updateProgress(progress);
+    };
+
+    const appendLog = (msg: string) => {
+      logs.push(msg);
+      log("sub-log", msg);
     };
 
     const useArtifacts = !!this.env.ARTIFACTS;
@@ -109,6 +117,8 @@ export class SessionDO implements DurableObject {
     try {
       // ── Step 0: Verify ARTIFACTS binding (optional) ─────────────────
       await setProgress("import", "running", "Checking Artifacts binding...");
+      appendLog(`Repository: ${owner}/${name}`);
+      appendLog(`Artifacts binding: ${useArtifacts ? "available" : "not available"}`);
       log("Step 0 — ARTIFACTS binding check", {
         exists: useArtifacts,
         type: typeof this.env.ARTIFACTS,
@@ -117,17 +127,20 @@ export class SessionDO implements DurableObject {
 
       if (!useArtifacts) {
         log("Step 0 — WARN", "ARTIFACTS binding is undefined; falling back to direct GitHub clone");
+        appendLog("Falling back to direct GitHub clone");
       }
 
       // ── Step 1: Import repo into Artifacts (fast path) ──────────────
       if (useArtifacts) {
         await setProgress("import", "running", STEP_LABELS.import);
+        appendLog(`Importing ${githubUrl} (branch: main)`);
         log("Step 1 — ARTIFACTS.import", { source: githubUrl, branch: "main", target: sessionId });
         try {
           artifact = await this.env.ARTIFACTS!.import({
             source: { url: githubUrl, branch: "main" },
             target: { name: sessionId },
           });
+          appendLog(`Artifact created: ${artifact.name}`);
           log("Step 1 — OK", artifact);
           await setProgress("import", "complete");
         } catch (err) {
@@ -138,10 +151,12 @@ export class SessionDO implements DurableObject {
 
         // ── Step 2: Create a write token for the artifact ─────────────
         await setProgress("token", "running", STEP_LABELS.token);
+        appendLog("Creating read-write token for artifact...");
         log("Step 2 — ARTIFACTS.get().createToken", { name: sessionId });
         try {
           const tokenRes = await this.env.ARTIFACTS!.get(sessionId).createToken("read-write", 3600);
           artifactToken = tokenRes.plaintext;
+          appendLog("Write token created");
           log("Step 2 — OK", { tokenLength: artifactToken?.length });
           await setProgress("token", "complete");
         } catch (err) {
@@ -157,10 +172,12 @@ export class SessionDO implements DurableObject {
 
       // ── Step 3: Get a sandbox instance ──────────────────────────────
       await setProgress("sandbox", "running", STEP_LABELS.sandbox);
+      appendLog("Requesting Cloudflare Sandbox instance...");
       log("Step 3 — getSandbox", { sessionId });
       let sandbox: Awaited<ReturnType<typeof getSandbox>>;
       try {
         sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
+        appendLog(`Sandbox ready (id: ${(sandbox as any).id?.slice(0, 8)}...)`);
         log("Step 3 — OK", { sandboxId: (sandbox as any).id });
         await setProgress("sandbox", "complete");
       } catch (err) {
@@ -171,20 +188,24 @@ export class SessionDO implements DurableObject {
 
       // ── Step 4: Clone the repo into the sandbox ─────────────────────
       await setProgress("clone", "running", STEP_LABELS.clone);
+      appendLog("Cloning repository into /workspace/repo...");
       let cloneUrl: string;
       if (artifact && artifactToken) {
         const encodedToken = encodeURIComponent(artifactToken);
         cloneUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
+        appendLog("Using Artifacts remote for clone");
         log("Step 4 — git clone (Artifacts)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
       } else {
         // Fallback: clone directly from GitHub using the user's token
         const encodedToken = encodeURIComponent(githubToken);
         cloneUrl = githubUrl.replace("https://", `https://${encodedToken}@`);
+        appendLog("Using GitHub direct clone (fallback)");
         log("Step 4 — git clone (GitHub fallback)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
       }
       let cloneRes: Awaited<ReturnType<typeof sandbox.exec>>;
       try {
         cloneRes = await sandbox.exec(`git clone ${cloneUrl} /workspace/repo`);
+        appendLog(`Clone finished (exit code: ${cloneRes.exitCode})`);
         log("Step 4 — result", { success: cloneRes.success, exitCode: cloneRes.exitCode, stderr: cloneRes.stderr });
         if (!cloneRes.success) {
           throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);
@@ -198,10 +219,13 @@ export class SessionDO implements DurableObject {
 
       // ── Step 5: Run git log to prove it worked ──────────────────────
       await setProgress("verify", "running", STEP_LABELS.verify);
+      appendLog("Verifying repository contents...");
       log("Step 5 — git log");
       let logRes: Awaited<ReturnType<typeof sandbox.exec>>;
       try {
         logRes = await sandbox.exec("cd /workspace/repo && git log --oneline -5");
+        const lines = logRes.stdout?.trim().split("\n").length ?? 0;
+        appendLog(`Verified ${lines} commits`);
         log("Step 5 — result", { success: logRes.success, exitCode: logRes.exitCode, stdout: logRes.stdout });
         if (!logRes.success) {
           throw new Error(`git log failed: ${logRes.stderr || logRes.stdout}`);
@@ -215,9 +239,11 @@ export class SessionDO implements DurableObject {
 
       // ── Step 6: Install KimiFlare globally ──────────────────────────
       await setProgress("install", "running", STEP_LABELS.install);
+      appendLog("Running npm install -g kimiflare...");
       log("Step 6 — npm install -g kimiflare");
       try {
         const installRes = await sandbox.exec("npm install -g kimiflare");
+        appendLog(installRes.success ? "KimiFlare installed successfully" : `Install warning (exit ${installRes.exitCode})`);
         log("Step 6 — result", { success: installRes.success, exitCode: installRes.exitCode });
         if (!installRes.success) {
           log("Step 6 — WARN", installRes.stderr || installRes.stdout);
@@ -225,11 +251,13 @@ export class SessionDO implements DurableObject {
         await setProgress("install", "complete");
       } catch (err) {
         log("Step 6 — WARN", err instanceof Error ? err.message : String(err));
+        appendLog("Install skipped (non-fatal)");
         await setProgress("install", "complete"); // non-fatal
       }
 
       // ── Step 7: Write KimiFlare config with Cloudflare credentials ──
       await setProgress("config", "running", STEP_LABELS.config);
+      appendLog("Writing Cloudflare credentials to ~/.config/kimiflare/config.json...");
       log("Step 7 — write KimiFlare config");
       try {
         await sandbox.exec("mkdir -p /root/.config/kimiflare");
@@ -241,15 +269,18 @@ export class SessionDO implements DurableObject {
         const writeRes = await sandbox.exec(
           `cat > /root/.config/kimiflare/config.json << 'KIMIEOF'\n${config}\nKIMIEOF`
         );
+        appendLog("Credentials configured");
         log("Step 7 — result", { success: writeRes.success });
         await setProgress("config", "complete");
       } catch (err) {
         log("Step 7 — WARN", err instanceof Error ? err.message : String(err));
+        appendLog("Config write skipped (non-fatal)");
         await setProgress("config", "complete"); // non-fatal
       }
 
       // ── Step 8: Store minimal session state ─────────────────────────
       await setProgress("finalize", "running", STEP_LABELS.finalize);
+      appendLog("Saving session state...");
       const sessionState: SessionState = {
         sessionId,
         userId,
@@ -265,6 +296,7 @@ export class SessionDO implements DurableObject {
         };
       }
       await this.state.storage.put("state", sessionState);
+      appendLog("Session ready — opening terminal...");
       log("Step 8 — state stored", { sessionId, userId, hasArtifacts: !!sessionState.artifactsRepo });
       await setProgress("finalize", "complete", "Ready!");
 

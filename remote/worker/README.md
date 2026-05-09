@@ -43,8 +43,8 @@ Open `http://localhost:8787` in your browser.
 ### 1. Clone this repo
 
 ```bash
-git clone https://github.com/sinameraji/kimiflare-web.git
-cd kimiflare-web/remote/worker
+git clone https://github.com/sinameraji/kimiflare-commute.git
+cd kimiflare-commute/remote/worker
 ```
 
 ### 2. Create a GitHub OAuth app

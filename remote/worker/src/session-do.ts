@@ -18,6 +18,10 @@ export class SessionDO implements DurableObject {
       return this.handleSetup(request);
     }
 
+    if (path.endsWith("/verify") && request.method === "GET") {
+      return this.handleVerify();
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -61,10 +65,7 @@ export class SessionDO implements DurableObject {
         throw new Error(`git log failed: ${logRes.stderr || logRes.stdout}`);
       }
 
-      // 6. Clean up sandbox
-      await sandbox.destroy();
-
-      // 7. Store minimal session state
+      // 6. Store minimal session state
       const sessionState: SessionState = {
         sessionId,
         userId,
@@ -78,10 +79,18 @@ export class SessionDO implements DurableObject {
       };
       await this.state.storage.put("state", sessionState);
 
-      return Response.json({ success: true, output: logRes.stdout });
+      return Response.json({ success: true, output: logRes.stdout, sessionId });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return Response.json({ success: false, error: message }, { status: 500 });
     }
+  }
+
+  private async handleVerify(): Promise<Response> {
+    const state = await this.state.storage.get<SessionState>("state");
+    if (!state) {
+      return new Response("Not found", { status: 404 });
+    }
+    return Response.json({ userId: state.userId, sessionId: state.sessionId });
   }
 }

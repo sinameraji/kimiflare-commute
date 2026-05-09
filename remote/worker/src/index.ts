@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
-import { Sandbox } from "@cloudflare/sandbox";
+import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
 import {
   getOAuthUrl,
@@ -177,6 +177,37 @@ app.post("/api/setup", async (c) => {
 
   const data = (await res.json()) as { success: boolean; output?: string; error?: string };
   return c.json(data);
+});
+
+// ── WebSocket: Terminal into sandbox ────────────────────────────────
+app.get("/ws/:sessionId", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+
+  // Verify the session belongs to this user
+  const doId = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(doId);
+  let verifyRes: Response;
+  try {
+    verifyRes = await doStub.fetch(new Request("http://internal/verify"));
+  } catch {
+    return c.json({ error: "Session unreachable" }, 500);
+  }
+  if (!verifyRes.ok) {
+    return c.json({ error: "Session not found" }, 404);
+  }
+  const verify = (await verifyRes.json()) as { userId: string; sessionId: string };
+  if (verify.userId !== auth.userId) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  // Connect to the sandbox PTY
+  const sandbox = await getSandbox(c.env.SANDBOX, sessionId);
+  const cols = Number(c.req.query("cols") ?? "120");
+  const rows = Number(c.req.query("rows") ?? "30");
+  return sandbox.terminal(c.req.raw, { cols, rows });
 });
 
 // ── Health check ────────────────────────────────────────────────────

@@ -214,7 +214,8 @@ app.post("/api/setup", async (c) => {
     envKeys: Object.keys(c.env as unknown as Record<string, unknown>),
   });
 
-  const sessionId = crypto.randomUUID();
+  // Deterministic session ID so reopening the same repo reuses the SessionDO
+  const sessionId = `${auth.userId}-${body.owner}-${body.name}`.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 64);
   const id = c.env.SESSION_DO.idFromName(sessionId);
   const doStub = c.env.SESSION_DO.get(id);
 

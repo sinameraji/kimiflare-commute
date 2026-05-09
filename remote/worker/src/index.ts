@@ -18,7 +18,7 @@ import { INDEX_HTML } from "./static.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
-function log(label: string, data: unknown) {
+function log(label: string, data?: unknown) {
   console.log(`[Worker] ${label}:`, JSON.stringify(data, null, 2));
 }
 
@@ -211,7 +211,7 @@ app.post("/api/setup", async (c) => {
     SANDBOX: !!c.env.SANDBOX,
     ARTIFACTS: !!c.env.ARTIFACTS,
     OAUTH_KV: !!c.env.OAUTH_KV,
-    envKeys: Object.keys(c.env as Record<string, unknown>),
+    envKeys: Object.keys(c.env as unknown as Record<string, unknown>),
   });
 
   const sessionId = crypto.randomUUID();

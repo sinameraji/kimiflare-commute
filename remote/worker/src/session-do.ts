@@ -1,7 +1,7 @@
 import type { SessionState, SetupProgress, Env } from "./types.js";
 import { getSandbox } from "@cloudflare/sandbox";
 
-function log(label: string, data: unknown) {
+function log(label: string, data?: unknown) {
   console.log(`[SessionDO] ${label}:`, JSON.stringify(data, null, 2));
 }
 
@@ -14,12 +14,12 @@ export class SessionDO implements DurableObject {
     this.env = env;
 
     // ── CRITICAL: log every binding we receive ────────────────────────
-    const envKeys = Object.keys(env as Record<string, unknown>);
+    const envKeys = Object.keys(env as unknown as Record<string, unknown>);
     log("CONSTRUCTOR — env keys", envKeys);
-    log("CONSTRUCTOR — ARTIFACTS type", typeof (env as Record<string, unknown>).ARTIFACTS);
-    log("CONSTRUCTOR — ARTIFACTS value", (env as Record<string, unknown>).ARTIFACTS);
-    log("CONSTRUCTOR — SANDBOX type", typeof (env as Record<string, unknown>).SANDBOX);
-    log("CONSTRUCTOR — OAUTH_KV type", typeof (env as Record<string, unknown>).OAUTH_KV);
+    log("CONSTRUCTOR — ARTIFACTS type", typeof (env as unknown as Record<string, unknown>).ARTIFACTS);
+    log("CONSTRUCTOR — ARTIFACTS value", (env as unknown as Record<string, unknown>).ARTIFACTS);
+    log("CONSTRUCTOR — SANDBOX type", typeof (env as unknown as Record<string, unknown>).SANDBOX);
+    log("CONSTRUCTOR — OAUTH_KV type", typeof (env as unknown as Record<string, unknown>).OAUTH_KV);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -108,7 +108,7 @@ export class SessionDO implements DurableObject {
       log("Step 0 — ARTIFACTS binding check", {
         exists: !!this.env.ARTIFACTS,
         type: typeof this.env.ARTIFACTS,
-        keys: this.env.ARTIFACTS ? Object.keys(this.env.ARTIFACTS as Record<string, unknown>) : null,
+        keys: this.env.ARTIFACTS ? Object.keys(this.env.ARTIFACTS as unknown as Record<string, unknown>) : null,
       });
 
       if (!this.env.ARTIFACTS) {
@@ -158,7 +158,7 @@ export class SessionDO implements DurableObject {
       let sandbox: Awaited<ReturnType<typeof getSandbox>>;
       try {
         sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
-        log("Step 3 — OK", { sandboxId: sandbox.id });
+        log("Step 3 — OK", { sandboxId: (sandbox as any).id });
         await setProgress("sandbox", "complete");
       } catch (err) {
         log("Step 3 — FAIL", err instanceof Error ? err.message : String(err));

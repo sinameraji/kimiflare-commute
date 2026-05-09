@@ -1,8 +1,0 @@
-node_modules
-worker/node_modules
-agent/node_modules
-*.log
-.git
-.gitignore
-README.md
-.env

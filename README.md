@@ -7,7 +7,7 @@ Browser-based terminal for [KimiFlare](https://github.com/sinameraji/kimiflare),
 - **Cloudflare Worker** (`remote/worker/`) — Auth, session management, LLM relay, telemetry
 - **Cloudflare Sandbox** — Containerized execution environment
 - **Cloudflare Artifacts** — Git repo storage per session
-- **Web UI** (`web/`) — xterm.js terminal in the browser
+- **Web UI** — xterm.js terminal served inline from the Worker
 
 ## Development
 

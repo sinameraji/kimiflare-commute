@@ -31,6 +31,8 @@ instance_type = "basic"
 max_instances = 5
 
 # ── Artifacts (repo storage) ──────────────────────────────────────────
+# Requires Wrangler >= 4.90.0. If unavailable, the worker falls back to
+# cloning directly from GitHub (slightly slower but fully functional).
 [[artifacts]]
 binding = "ARTIFACTS"
 namespace = "default"

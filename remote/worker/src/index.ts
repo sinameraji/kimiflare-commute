@@ -3,7 +3,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
-import { Sandbox, proxyTerminal } from "@cloudflare/sandbox";
+import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -203,16 +203,23 @@ app.get("/ws/:sessionId", async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
 
-  // Forward WebSocket upgrade to the Sandbox DO so the container PTY
-  // handshake happens inside the DO (required by the runtime).
+  // Use the SDK session-based terminal API so the container session is
+  // properly initialised before the PTY handshake.
   const cols = Number(c.req.query("cols") ?? "120");
   const rows = Number(c.req.query("rows") ?? "30");
 
-  const sandboxId = c.env.SANDBOX.idFromName(sessionId);
-  const sandbox = c.env.SANDBOX.get(sandboxId);
-  const containerSessionId = `sandbox-${sessionId}`;
-
-  return proxyTerminal(sandbox, containerSessionId, c.req.raw, { cols, rows });
+  try {
+    const sandbox = getSandbox(c.env.SANDBOX as any, sessionId);
+    const containerSessionId = `sandbox-${sessionId}`;
+    const session = await sandbox.getSession(containerSessionId);
+    return await session.terminal(c.req.raw, { cols, rows });
+  } catch (err) {
+    console.error("Terminal connection error:", err);
+    return c.json(
+      { error: err instanceof Error ? err.message : "Terminal connection failed" },
+      500
+    );
+  }
 });
 
 // ── Health check ────────────────────────────────────────────────────

@@ -49,7 +49,7 @@ export class SessionDO implements DurableObject {
       const artifactToken = tokenRes.plaintext;
 
       // 3. Get a sandbox instance
-      const sandbox = await getSandbox(this.env.SANDBOX, sessionId);
+      const sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
 
       // 4. Clone the artifact repo into the sandbox
       const encodedToken = encodeURIComponent(artifactToken);

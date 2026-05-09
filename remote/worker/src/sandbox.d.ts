@@ -1,4 +1,9 @@
 declare module "@cloudflare/sandbox" {
+  export interface ExecutionSession {
+    id: string;
+    terminal(request: Request, options?: { cols?: number; rows?: number }): Promise<Response>;
+  }
+
   export interface SandboxInstance {
     id: string;
     exec(command: string, opts?: {
@@ -22,6 +27,7 @@ declare module "@cloudflare/sandbox" {
     readFile(path: string): Promise<string>;
     setKeepAlive(keepAlive: boolean): Promise<void>;
     destroy(): Promise<void>;
+    getSession(sessionId: string): Promise<ExecutionSession>;
     terminal(request: Request, options?: { cols?: number; rows?: number }): Promise<Response>;
   }
 

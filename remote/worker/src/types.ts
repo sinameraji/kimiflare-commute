@@ -18,7 +18,7 @@ export interface Env {
   SANDBOX: DurableObjectNamespace;
 
   // Bindings
-  ARTIFACTS: ArtifactsRegistry;
+  ARTIFACTS?: ArtifactsRegistry;
   OAUTH_KV: KVNamespace;
 
   // Secrets

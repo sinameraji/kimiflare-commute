@@ -442,7 +442,8 @@ export const INDEX_HTML = `<!DOCTYPE html>
         const logsHtml = stepLogs.map((l, i) => {
           // Only animate logs that are new since last render
           const isNew = i >= prevLen;
-          const style = isNew ? '' : 'animation:none;opacity:1;transform:none;';
+          const delay = isNew ? (i - prevLen) * 0.12 : 0;
+          const style = isNew ? 'animation-delay:' + delay + 's' : 'animation:none;opacity:1;transform:none;';
           return \`<div class="log-line" style="\${style}">\${escapeHtml(l)}</div>\`;
         }).join('');
 

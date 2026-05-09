@@ -110,6 +110,27 @@ export class SessionDO implements DurableObject {
       log("sub-log", msg);
     };
 
+    // ── Fast path: check for existing session ─────────────────────────
+    const existing = await this.state.storage.get<SessionState>("state");
+    if (existing) {
+      log("handleSetup — existing state found", { sessionId: existing.sessionId });
+      try {
+        const sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
+        const verifyRes = await sandbox.exec("test -d /workspace/repo && echo ok || echo missing");
+        if (verifyRes.stdout?.trim() === "ok") {
+          appendLog("Resuming existing session — repo verified");
+          log("handleSetup — repo verified, resuming");
+          await setProgress("finalize", "complete", "Session resumed");
+          return Response.json({ success: true, resumed: true, sessionId });
+        }
+        log("handleSetup — repo missing, clearing old state");
+        await this.state.storage.delete("state");
+      } catch (err) {
+        log("handleSetup — verify failed, falling back to full setup", err instanceof Error ? err.message : String(err));
+        await this.state.storage.delete("state");
+      }
+    }
+
     const useArtifacts = !!this.env.ARTIFACTS;
     let artifact: { name: string; remote: string } | undefined;
     let artifactToken: string | undefined;

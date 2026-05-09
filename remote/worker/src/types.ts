@@ -47,3 +47,15 @@ export interface SessionState {
   githubToken?: string;
   createdAt: number;
 }
+
+export interface SetupProgress {
+  step: string;
+  stepIndex: number;
+  totalSteps: number;
+  status: "running" | "complete" | "error";
+  message: string;
+  completedSteps: string[];
+  error?: string;
+  sessionId?: string;
+  output?: string;
+}

@@ -11,11 +11,11 @@ class_name = "SessionDO"
 
 [[durable_objects.bindings]]
 name = "SANDBOX"
-class_name = "KimiSandbox"
+class_name = "Sandbox"
 
 # Containers (Sandbox)
 [[containers]]
-class_name = "KimiSandbox"
+class_name = "Sandbox"
 image = "./Dockerfile"
 instance_type = "basic"
 max_instances = 5

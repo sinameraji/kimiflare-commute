@@ -3,7 +3,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
-import { KimiSandbox } from "./sandbox-wrapper.js";
+import { Sandbox } from "./sandbox-wrapper.js";
 import {
   getOAuthUrl,
   exchangeCode,
@@ -224,4 +224,4 @@ app.get("/ws/:sessionId", async (c) => {
 app.get("/health", (c) => c.json({ ok: true }));
 
 export default app;
-export { SessionDO, KimiSandbox, WarmPool };
+export { SessionDO, Sandbox, WarmPool };

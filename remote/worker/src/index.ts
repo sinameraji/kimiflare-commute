@@ -220,36 +220,53 @@ app.post("/api/setup", async (c) => {
 
   log("/api/setup — DO stub created", { sessionId, doId: id.toString() });
 
-  let res: Response;
+  // Kick off setup in the background so the client can poll for progress
+  const setupPromise = doStub.fetch(new Request("http://internal/setup", {
+    method: "POST",
+    body: JSON.stringify({
+      owner: body.owner,
+      name: body.name,
+      githubToken: auth.token,
+      userId: auth.userId,
+      sessionId,
+      accountId: c.env.ACCOUNT_ID,
+      apiToken: c.env.CF_API_TOKEN,
+    }),
+    headers: { "Content-Type": "application/json" },
+  }));
+
+  c.executionCtx.waitUntil(
+    setupPromise.then(async (res) => {
+      log("/api/setup — background DO response", { status: res.status, ok: res.ok, sessionId });
+    }).catch((err) => {
+      log("/api/setup — background DO fetch FAIL", err instanceof Error ? err.message : String(err));
+    })
+  );
+
+  // Return immediately so the UI can start polling progress
+  return c.json({ sessionId, status: "started" });
+});
+
+// ── API: Poll setup progress ────────────────────────────────────────
+app.get("/api/setup/progress/:sessionId", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+  const doId = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(doId);
+
   try {
-    res = await doStub.fetch(new Request("http://internal/setup", {
-      method: "POST",
-      body: JSON.stringify({
-        owner: body.owner,
-        name: body.name,
-        githubToken: auth.token,
-        userId: auth.userId,
-        sessionId,
-        accountId: c.env.ACCOUNT_ID,
-        apiToken: c.env.CF_API_TOKEN,
-      }),
-      headers: { "Content-Type": "application/json" },
-    }));
-    log("/api/setup — DO response", { status: res.status, ok: res.ok });
+    const res = await doStub.fetch(new Request("http://internal/progress"));
+    if (!res.ok) {
+      return c.json({ error: "Progress not found" }, 404);
+    }
+    const progress = await res.json();
+    return c.json(progress);
   } catch (err) {
-    log("/api/setup — DO fetch FAIL", err instanceof Error ? err.message : String(err));
-    return c.json({ error: err instanceof Error ? err.message : "Session DO unreachable" }, 500);
+    log("/api/setup/progress — FAIL", err instanceof Error ? err.message : String(err));
+    return c.json({ error: "Failed to fetch progress" }, 500);
   }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "Setup failed");
-    log("/api/setup — DO error body", text);
-    return c.json({ error: text }, res.status as 500);
-  }
-
-  const data = (await res.json()) as { success: boolean; output?: string; error?: string };
-  log("/api/setup — result", data);
-  return c.json(data);
 });
 
 // ── WebSocket: Terminal into sandbox ────────────────────────────────

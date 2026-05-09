@@ -1,0 +1,82 @@
+{
+  "name": "kimiflare",
+  "version": "0.48.5",
+  "description": "A terminal coding agent powered by Kimi-K2.6 on Cloudflare Workers AI. BYOK or Cloud mode. Web search, GitHub, headless browser, LSP, MCP, local memory, 262k context.",
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-agent",
+    "terminal",
+    "kimi",
+    "k2.6",
+    "cloudflare",
+    "workers-ai",
+    "vision",
+    "image-understanding",
+    "llm",
+    "code-generation",
+    "tui",
+    "mcp",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sinameraji/kimiflare.git"
+  },
+  "homepage": "https://github.com/sinameraji/kimiflare#readme",
+  "bugs": "https://github.com/sinameraji/kimiflare/issues",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "kimiflare": "bin/kimiflare.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "PLAN.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "build:remote": "npm run build:worker && npm run build:remote-agent",
+    "build:worker": "cd remote/worker && npm run typecheck",
+    "build:remote-agent": "cd remote/agent && npx tsup",
+    "dev": "tsx src/index.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts src/**/*.test.tsx",
+    "start": "node bin/kimiflare.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.9.0",
+    "commander": "^12.1.0",
+    "diff": "^7.0.0",
+    "fast-glob": "^3.3.2",
+    "gray-matter": "^4.0.3",
+    "ink": "^7.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "minimatch": "^10.2.5",
+    "react": "^19.2.0",
+    "turndown": "^7.2.0",
+    "typescript": "^5.7.2",
+    "vscode-languageserver-protocol": "^3.17.5"
+  },
+  "optionalDependencies": {
+    "isolated-vm": "^6.1.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.9.0",
+    "@types/react": "^19.2.0",
+    "@types/turndown": "^5.0.5",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2"
+  }
+}

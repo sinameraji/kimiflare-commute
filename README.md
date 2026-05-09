@@ -1,6 +1,6 @@
 # KimiFlare Web
 
-Browser-based terminal for KimiFlare, orchestrated by Cloudflare Workers and executing in Cloudflare Sandbox.
+Browser-based terminal for [KimiFlare](https://github.com/sinameraji/kimiflare), orchestrated by Cloudflare Workers and executing in Cloudflare Sandbox.
 
 ## Architecture
 

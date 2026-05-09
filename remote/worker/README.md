@@ -1,6 +1,6 @@
 # KimiFlare Commute — Self-hosted Cloudflare Worker
 
-Run KimiFlare (Kimi-K2.6 coding agent) in a Cloudflare Sandbox, directly from your browser. Pick any GitHub repo, get an instant terminal sandbox with KimiFlare pre-installed and ready to code.
+Run [KimiFlare](https://github.com/sinameraji/kimiflare) (Kimi-K2.6 coding agent) in a Cloudflare Sandbox, directly from your browser. Pick any GitHub repo, get an instant terminal sandbox with KimiFlare pre-installed and ready to code.
 
 ## What this is
 
@@ -43,8 +43,8 @@ Open `http://localhost:8787` in your browser.
 ### 1. Clone this repo
 
 ```bash
-git clone https://github.com/sinameraji/kimiflare.git
-cd kimiflare/remote/worker
+git clone https://github.com/sinameraji/kimiflare-web.git
+cd kimiflare-web/remote/worker
 ```
 
 ### 2. Create a GitHub OAuth app

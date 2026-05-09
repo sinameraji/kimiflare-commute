@@ -26,6 +26,12 @@ export interface Env {
   GITHUB_OAUTH_CLIENT_SECRET: string;
   ENCRYPTION_KEY: string;
   ALLOWED_GITHUB_IDS?: string;
+  ADMIN_GITHUB_ID?: string;
+  REMOTE_AUTH_SECRET?: string;
+
+  // Cloudflare BYOK credentials
+  ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
 }
 
 export interface SessionState {

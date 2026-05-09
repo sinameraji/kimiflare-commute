@@ -44,9 +44,11 @@ export class SessionDO implements DurableObject {
       name: string;
       githubToken: string;
       userId: string;
+      accountId: string;
+      apiToken: string;
     };
 
-    const { owner, name, githubToken, userId, sessionId } = body;
+    const { owner, name, githubToken, userId, sessionId, accountId, apiToken } = body;
     const githubUrl = `https://github.com/${owner}/${name}.git`;
 
     log("handleSetup — start", { owner, name, userId, sessionId });
@@ -134,7 +136,36 @@ export class SessionDO implements DurableObject {
         throw err;
       }
 
-      // ── Step 6: Store minimal session state ─────────────────────────
+      // ── Step 6: Install KimiFleur globally ──────────────────────────
+      log("Step 6 — npm install -g kimiflare");
+      try {
+        const installRes = await sandbox.exec("npm install -g kimiflare");
+        log("Step 6 — result", { success: installRes.success, exitCode: installRes.exitCode });
+        if (!installRes.success) {
+          log("Step 6 — WARN", installRes.stderr || installRes.stdout);
+        }
+      } catch (err) {
+        log("Step 6 — WARN", err instanceof Error ? err.message : String(err));
+      }
+
+      // ── Step 7: Write KimiFleur config with Cloudflare credentials ──
+      log("Step 7 — write KimiFleur config");
+      try {
+        await sandbox.exec("mkdir -p /root/.config/kimiflare");
+        const config = JSON.stringify({
+          accountId,
+          apiToken,
+          model: "@cf/moonshotai/kimi-k2.6",
+        }, null, 2);
+        const writeRes = await sandbox.exec(
+          `cat > /root/.config/kimiflare/config.json << 'KIMIEOF'\n${config}\nKIMIEOF`
+        );
+        log("Step 7 — result", { success: writeRes.success });
+      } catch (err) {
+        log("Step 7 — WARN", err instanceof Error ? err.message : String(err));
+      }
+
+      // ── Step 8: Store minimal session state ─────────────────────────
       const sessionState: SessionState = {
         sessionId,
         userId,
@@ -147,7 +178,7 @@ export class SessionDO implements DurableObject {
         createdAt: Date.now(),
       };
       await this.state.storage.put("state", sessionState);
-      log("Step 6 — state stored", { sessionId, userId });
+      log("Step 8 — state stored", { sessionId, userId });
 
       log("handleSetup — SUCCESS", { sessionId, outputLines: logRes.stdout?.split("\n").length });
       return Response.json({ success: true, output: logRes.stdout, sessionId });

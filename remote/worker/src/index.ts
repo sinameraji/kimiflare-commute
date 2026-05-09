@@ -230,6 +230,8 @@ app.post("/api/setup", async (c) => {
         githubToken: auth.token,
         userId: auth.userId,
         sessionId,
+        accountId: c.env.ACCOUNT_ID,
+        apiToken: c.env.CF_API_TOKEN,
       }),
       headers: { "Content-Type": "application/json" },
     }));

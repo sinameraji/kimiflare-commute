@@ -14,13 +14,15 @@ Run [KimiFlare](https://github.com/sinameraji/kimiflare) (Kimi-K2.6 coding agent
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) ≥ 20
-- A [Cloudflare](https://dash.cloudflare.com) account
+- A [Cloudflare](https://dash.cloudflare.com) account with **Cloudflare Sandbox** enabled
 - A [GitHub](https://github.com) account
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/) CLI installed and authenticated:
   ```bash
   npm install -g wrangler
   wrangler login
   ```
+
+> **Cloudflare Sandbox & Artifacts:** This worker uses [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/) (containers for secure code execution) and [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) (repo storage). Sandbox reached General Availability in April 2026 and is available to all Cloudflare Workers customers. Artifacts may still require beta access — if you see an `ARTIFACTS binding not available` error, see [Troubleshooting](#artifacts-binding-not-available).
 
 ## Local development
 
@@ -157,7 +159,7 @@ Browser ──► Cloudflare Worker (Hono)
 | `src/static.ts` | Single-page app HTML/CSS/JS (repo picker, progress UI, terminal) |
 | `src/types.ts` | TypeScript interfaces |
 | `wrangler.toml` | Worker config — bindings, secrets, containers |
-| `Dockerfile` | Container image for the sandbox |
+| `Dockerfile` | Container image for the sandbox (uses the public `docker.io/cloudflare/sandbox` base image) |
 
 ## Costs
 

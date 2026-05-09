@@ -171,16 +171,20 @@ export class SessionDO implements DurableObject {
             appendLog("Artifact exists — refreshing...");
             try {
               await this.env.ARTIFACTS!.delete(sessionId);
-            } catch (delErr) {
-              log("Step 1 — delete warning", delErr instanceof Error ? delErr.message : String(delErr));
+              artifact = await this.env.ARTIFACTS!.import({
+                source: { url: githubUrl, branch: "main" },
+                target: { name: sessionId },
+              });
+              appendLog(`Artifact refreshed: ${artifact.name}`);
+              log("Step 1 — OK (refreshed)", artifact);
+              await setProgress("import", "complete");
+            } catch (refreshErr) {
+              const refreshMsg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+              log("Step 1 — refresh failed, falling back to direct clone", refreshMsg);
+              appendLog(`Artifact refresh failed: ${refreshMsg}`);
+              appendLog("Falling back to direct GitHub clone");
+              await setProgress("import", "complete", "Artifact exists — using direct clone");
             }
-            artifact = await this.env.ARTIFACTS!.import({
-              source: { url: githubUrl, branch: "main" },
-              target: { name: sessionId },
-            });
-            appendLog(`Artifact refreshed: ${artifact.name}`);
-            log("Step 1 — OK (refreshed)", artifact);
-            await setProgress("import", "complete");
           } else {
             log("Step 1 — FAIL", msg);
             await setProgress("import", "error", STEP_LABELS.import, msg);
@@ -189,19 +193,23 @@ export class SessionDO implements DurableObject {
         }
 
         // ── Step 2: Create a write token for the artifact ─────────────
-        await setProgress("token", "running", STEP_LABELS.token);
-        appendLog("Creating read-write token for artifact...");
-        log("Step 2 — ARTIFACTS.get().createToken", { name: sessionId });
-        try {
-          const tokenRes = await this.env.ARTIFACTS!.get(sessionId).createToken("read-write", 3600);
-          artifactToken = tokenRes.plaintext;
-          appendLog("Write token created");
-          log("Step 2 — OK", { tokenLength: artifactToken?.length });
-          await setProgress("token", "complete");
-        } catch (err) {
-          log("Step 2 — FAIL", err instanceof Error ? err.message : String(err));
-          await setProgress("token", "error", STEP_LABELS.token, err instanceof Error ? err.message : String(err));
-          throw err;
+        if (artifact) {
+          await setProgress("token", "running", STEP_LABELS.token);
+          appendLog("Creating read-write token for artifact...");
+          log("Step 2 — ARTIFACTS.get().createToken", { name: sessionId });
+          try {
+            const tokenRes = await this.env.ARTIFACTS!.get(sessionId).createToken("read-write", 3600);
+            artifactToken = tokenRes.plaintext;
+            appendLog("Write token created");
+            log("Step 2 — OK", { tokenLength: artifactToken?.length });
+            await setProgress("token", "complete");
+          } catch (err) {
+            log("Step 2 — FAIL", err instanceof Error ? err.message : String(err));
+            await setProgress("token", "error", STEP_LABELS.token, err instanceof Error ? err.message : String(err));
+            throw err;
+          }
+        } else {
+          await setProgress("token", "complete", "Skipped — using direct GitHub clone");
         }
       } else {
         // Fallback: skip Artifacts steps, clone directly from GitHub later

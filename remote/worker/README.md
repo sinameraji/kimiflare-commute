@@ -16,13 +16,13 @@ Run [KimiFlare](https://github.com/sinameraji/kimiflare) (Kimi-K2.6 coding agent
 - [Node.js](https://nodejs.org/) ≥ 20
 - A [Cloudflare](https://dash.cloudflare.com) account with **Cloudflare Sandbox** enabled
 - A [GitHub](https://github.com) account
-- [Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/) CLI installed and authenticated:
+- [Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/) CLI ≥ **4.90.0** installed and authenticated:
   ```bash
   npm install -g wrangler
   wrangler login
   ```
 
-> **Cloudflare Sandbox & Artifacts:** This worker uses [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/) (containers for secure code execution) and [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) (repo storage). Sandbox reached General Availability in April 2026 and is available to all Cloudflare Workers customers. Artifacts may still require beta access — if you see an `ARTIFACTS binding not available` error, see [Troubleshooting](#artifacts-binding-not-available).
+> **Cloudflare Sandbox & Artifacts:** This worker uses [Cloudflare Sandbox](https://developers.cloudflare.com/sandbox/) (containers for secure code execution) and [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) (repo storage). Sandbox reached General Availability in April 2026 and is available to all Cloudflare Workers customers. Artifacts may still require beta access. If Artifacts is not available, the worker automatically falls back to cloning directly from GitHub — everything still works, just slightly slower on first setup. See [Troubleshooting](#artifacts-binding-not-available) for details.
 
 ## Local development
 
@@ -175,7 +175,15 @@ See [Cloudflare pricing](https://developers.cloudflare.com/workers-ai/pricing/) 
 
 ### "ARTIFACTS binding not available"
 
-Make sure your Cloudflare account has the Artifacts feature enabled. It's currently in beta — you may need to request access.
+This can happen for two reasons:
+
+1. **Wrangler is too old.** The `[[artifacts]]` table in `wrangler.toml` requires Wrangler ≥ 4.90.0. Upgrade with:
+   ```bash
+   npm install -g wrangler@latest
+   ```
+   Then redeploy: `wrangler deploy`
+
+2. **Your Cloudflare account doesn't have Artifacts beta access.** The worker will automatically fall back to cloning directly from GitHub using your OAuth token. Everything works — the only difference is that repo cloning happens inside the sandbox instead of via the fast Artifacts import path.
 
 ### "Not authorized" after GitHub login
 

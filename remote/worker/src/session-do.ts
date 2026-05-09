@@ -102,55 +102,58 @@ export class SessionDO implements DurableObject {
       return this.updateProgress(progress);
     };
 
+    const useArtifacts = !!this.env.ARTIFACTS;
+    let artifact: { name: string; remote: string } | undefined;
+    let artifactToken: string | undefined;
+
     try {
-      // ── Step 0: Verify ARTIFACTS binding exists ─────────────────────
+      // ── Step 0: Verify ARTIFACTS binding (optional) ─────────────────
       await setProgress("import", "running", "Checking Artifacts binding...");
       log("Step 0 — ARTIFACTS binding check", {
-        exists: !!this.env.ARTIFACTS,
+        exists: useArtifacts,
         type: typeof this.env.ARTIFACTS,
         keys: this.env.ARTIFACTS ? Object.keys(this.env.ARTIFACTS as unknown as Record<string, unknown>) : null,
       });
 
-      if (!this.env.ARTIFACTS) {
-        log("Step 0 — FAIL", "ARTIFACTS binding is undefined");
-        await setProgress("import", "error", "Artifacts binding not available", "ARTIFACTS binding not available. Worker may need redeployment.");
-        return Response.json(
-          { success: false, error: "ARTIFACTS binding not available. Worker may need redeployment." },
-          { status: 500 }
-        );
+      if (!useArtifacts) {
+        log("Step 0 — WARN", "ARTIFACTS binding is undefined; falling back to direct GitHub clone");
       }
 
-      // ── Step 1: Import repo into Artifacts ──────────────────────────
-      await setProgress("import", "running", STEP_LABELS.import);
-      log("Step 1 — ARTIFACTS.import", { source: githubUrl, branch: "main", target: sessionId });
-      let artifact: { name: string; remote: string };
-      try {
-        artifact = await this.env.ARTIFACTS.import({
-          source: { url: githubUrl, branch: "main" },
-          target: { name: sessionId },
-        });
-        log("Step 1 — OK", artifact);
-        await setProgress("import", "complete");
-      } catch (err) {
-        log("Step 1 — FAIL", err instanceof Error ? err.message : String(err));
-        await setProgress("import", "error", STEP_LABELS.import, err instanceof Error ? err.message : String(err));
-        throw err;
-      }
+      // ── Step 1: Import repo into Artifacts (fast path) ──────────────
+      if (useArtifacts) {
+        await setProgress("import", "running", STEP_LABELS.import);
+        log("Step 1 — ARTIFACTS.import", { source: githubUrl, branch: "main", target: sessionId });
+        try {
+          artifact = await this.env.ARTIFACTS!.import({
+            source: { url: githubUrl, branch: "main" },
+            target: { name: sessionId },
+          });
+          log("Step 1 — OK", artifact);
+          await setProgress("import", "complete");
+        } catch (err) {
+          log("Step 1 — FAIL", err instanceof Error ? err.message : String(err));
+          await setProgress("import", "error", STEP_LABELS.import, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
 
-      // ── Step 2: Create a write token for the artifact ───────────────
-      await setProgress("token", "running", STEP_LABELS.token);
-      log("Step 2 — ARTIFACTS.get().createToken", { name: sessionId });
-      let tokenRes: { plaintext: string };
-      try {
-        tokenRes = await this.env.ARTIFACTS.get(sessionId).createToken("read-write", 3600);
-        log("Step 2 — OK", { tokenLength: tokenRes.plaintext?.length });
-        await setProgress("token", "complete");
-      } catch (err) {
-        log("Step 2 — FAIL", err instanceof Error ? err.message : String(err));
-        await setProgress("token", "error", STEP_LABELS.token, err instanceof Error ? err.message : String(err));
-        throw err;
+        // ── Step 2: Create a write token for the artifact ─────────────
+        await setProgress("token", "running", STEP_LABELS.token);
+        log("Step 2 — ARTIFACTS.get().createToken", { name: sessionId });
+        try {
+          const tokenRes = await this.env.ARTIFACTS!.get(sessionId).createToken("read-write", 3600);
+          artifactToken = tokenRes.plaintext;
+          log("Step 2 — OK", { tokenLength: artifactToken?.length });
+          await setProgress("token", "complete");
+        } catch (err) {
+          log("Step 2 — FAIL", err instanceof Error ? err.message : String(err));
+          await setProgress("token", "error", STEP_LABELS.token, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
+      } else {
+        // Fallback: skip Artifacts steps, clone directly from GitHub later
+        await setProgress("import", "complete", "Artifacts not available — using direct GitHub clone");
+        await setProgress("token", "complete", "Skipped (no Artifacts binding)");
       }
-      const artifactToken = tokenRes.plaintext;
 
       // ── Step 3: Get a sandbox instance ──────────────────────────────
       await setProgress("sandbox", "running", STEP_LABELS.sandbox);
@@ -166,14 +169,22 @@ export class SessionDO implements DurableObject {
         throw err;
       }
 
-      // ── Step 4: Clone the artifact repo into the sandbox ────────────
+      // ── Step 4: Clone the repo into the sandbox ─────────────────────
       await setProgress("clone", "running", STEP_LABELS.clone);
-      const encodedToken = encodeURIComponent(artifactToken);
-      const authArtifactUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
-      log("Step 4 — git clone", { url: authArtifactUrl.replace(encodedToken, "***REDACTED***") });
+      let cloneUrl: string;
+      if (artifact && artifactToken) {
+        const encodedToken = encodeURIComponent(artifactToken);
+        cloneUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
+        log("Step 4 — git clone (Artifacts)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
+      } else {
+        // Fallback: clone directly from GitHub using the user's token
+        const encodedToken = encodeURIComponent(githubToken);
+        cloneUrl = githubUrl.replace("https://", `https://${encodedToken}@`);
+        log("Step 4 — git clone (GitHub fallback)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
+      }
       let cloneRes: Awaited<ReturnType<typeof sandbox.exec>>;
       try {
-        cloneRes = await sandbox.exec(`git clone ${authArtifactUrl} /workspace/repo`);
+        cloneRes = await sandbox.exec(`git clone ${cloneUrl} /workspace/repo`);
         log("Step 4 — result", { success: cloneRes.success, exitCode: cloneRes.exitCode, stderr: cloneRes.stderr });
         if (!cloneRes.success) {
           throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);
@@ -243,15 +254,18 @@ export class SessionDO implements DurableObject {
         sessionId,
         userId,
         repo: { owner, name },
-        artifactsRepo: {
+        githubToken,
+        createdAt: Date.now(),
+      };
+      if (artifact && artifactToken) {
+        sessionState.artifactsRepo = {
           name: sessionId,
           url: artifact.remote,
           writeToken: artifactToken,
-        },
-        createdAt: Date.now(),
-      };
+        };
+      }
       await this.state.storage.put("state", sessionState);
-      log("Step 8 — state stored", { sessionId, userId });
+      log("Step 8 — state stored", { sessionId, userId, hasArtifacts: !!sessionState.artifactsRepo });
       await setProgress("finalize", "complete", "Ready!");
 
       log("handleSetup — SUCCESS", { sessionId, outputLines: logRes.stdout?.split("\n").length });

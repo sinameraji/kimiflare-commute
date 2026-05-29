@@ -15,6 +15,7 @@ import {
   deleteSession,
 } from "./auth.js";
 import { INDEX_HTML } from "./static.js";
+import { handleWorkerRequest } from "./worker-handler.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -320,6 +321,11 @@ app.get("/ws/:sessionId", async (c) => {
       500
     );
   }
+});
+
+// ── Multi-agent worker endpoint ─────────────────────────────────────
+app.post("/worker", async (c) => {
+  return handleWorkerRequest(c);
 });
 
 // ── Health check ────────────────────────────────────────────────────

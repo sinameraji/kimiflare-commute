@@ -32,6 +32,9 @@ export interface Env {
   // Cloudflare BYOK credentials
   ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+
+  // Multi-agent worker endpoint auth
+  WORKER_API_KEY?: string;
 }
 
 export interface SessionState {

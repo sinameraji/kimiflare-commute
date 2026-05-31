@@ -36,6 +36,12 @@ export interface WorkerRequest {
   branchName?: string;
   prTitle?: string;
   prBody?: string;
+  /** Optional override for the in-sandbox kimiflare install. Passed to
+   *  `npm install -g <kimiflareInstall>` post-clone before the agent runs.
+   *  Examples: "kimiflare@latest", "kimiflare@1.2.3",
+   *  "github:sinameraji/kimiflare#feat/some-branch". When omitted, the image's
+   *  pre-installed kimiflare (built into the Dockerfile) is used. */
+  kimiflareInstall?: string;
 }
 
 export interface WorkerResponse {
@@ -179,6 +185,21 @@ async function runWorker(
     await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
     await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
 
+    // 3b. (Optional) Override the in-sandbox kimiflare with a specific version
+    // or git ref. Required if the user is iterating on un-published CLI code
+    // and wants the worker to run THAT code instead of the image-baked one.
+    if (req.kimiflareInstall) {
+      const installArg = shellEscapeArg(req.kimiflareInstall);
+      log("installing kimiflare override", { workerId, install: req.kimiflareInstall });
+      const installRes = await sandbox.exec(`npm install -g ${installArg}`);
+      if (!installRes.success) {
+        log("kimiflare install failed (continuing with image-baked version)", {
+          workerId,
+          stderr: (installRes.stderr ?? "").slice(0, 300),
+        });
+      }
+    }
+
     // 4. Write Cloudflare credentials so the kimiflare CLI inside can call Workers AI
     const config = JSON.stringify({
       accountId: env.ACCOUNT_ID,
@@ -275,6 +296,22 @@ async function runWorker(
       await sandbox.exec("rm -rf /workspace/repo /root/.config/kimiflare");
     } catch (err) {
       log("cleanup warning (sandbox files)", err instanceof Error ? err.message : String(err));
+    }
+    // Speculative: ask the Sandbox to release the underlying container so we
+    // don't sit on an instance slot until the platform reclaims it. The
+    // @cloudflare/sandbox API may or may not expose this — try common names;
+    // harmless no-op if none exist.
+    for (const m of ["destroy", "stop", "kill", "shutdown"] as const) {
+      const fn = (sandbox as unknown as Record<string, unknown>)[m];
+      if (typeof fn === "function") {
+        try {
+          await (fn as () => Promise<unknown>).call(sandbox);
+          log("sandbox released", { workerId, via: m });
+          break;
+        } catch (err) {
+          log(`sandbox.${m} threw`, err instanceof Error ? err.message : String(err));
+        }
+      }
     }
     if (env.ARTIFACTS && artifact) {
       try {

@@ -28,7 +28,12 @@ class_name = "Sandbox"
 class_name = "Sandbox"
 image = "./Dockerfile"
 instance_type = "basic"
-max_instances = 5
+# Bumped from 5 to give parallel worker fan-out headroom: the multi-agent
+# coordinator spawns up to KIMIFLARE_WORKER_MAX_PARALLEL (default 3) plan
+# workers and optionally a 4th executor, and each worker holds a Sandbox
+# instance for its lifetime (1-4 min typical). 5 was tight; 20 leaves
+# room for a few concurrent sessions on top of the terminal feature.
+max_instances = 20
 
 # ── Artifacts (repo storage) ──────────────────────────────────────────
 # Requires Wrangler >= 4.90.0. If unavailable, the worker falls back to

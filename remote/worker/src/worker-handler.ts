@@ -134,7 +134,15 @@ export async function handleWorkerRequest(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log("failed", { workerId, error: message });
-    return c.json(emptyResponse(workerId, body.task, message), 500);
+    // Distinguish DO reset / sandbox crashes from application errors so the
+    // coordinator retry logic can treat them appropriately.
+    const isSandboxCrash =
+      message.includes("Network connection lost") ||
+      message.includes("Durable Object storage") ||
+      message.includes("reset") ||
+      message.includes("sandbox");
+    const statusCode = isSandboxCrash ? 503 : 500;
+    return c.json(emptyResponse(workerId, body.task, message), statusCode);
   }
 }
 
@@ -184,6 +192,7 @@ async function runWorker(
     if (!cloneRes.success) {
       throw new Error(`git clone failed: ${(cloneRes.stderr || cloneRes.stdout || "").slice(0, 300)}`);
     }
+    log("repo cloned", { workerId });
     // Ensure remote uses the GitHub token so push works in execute mode
     const encodedGhToken = encodeURIComponent(githubToken);
     const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
@@ -197,13 +206,22 @@ async function runWorker(
     // image-baked version.
     const installSpec = req.kimiflareInstall ?? "kimiflare@latest";
     const installArg = shellEscapeArg(installSpec);
-    log("installing kimiflare in sandbox", { workerId, install: installSpec });
-    const installRes = await sandbox.exec(`npm install -g ${installArg}`);
-    if (!installRes.success) {
-      log("kimiflare install failed (continuing with image-baked version)", {
-        workerId,
-        stderr: (installRes.stderr ?? "").slice(0, 300),
-      });
+    // Skip npm install if the image already has kimiflare and the user isn't
+    // requesting a specific override. This saves ~60s of CPU/memory pressure
+    // inside the Sandbox, reducing the chance of DO reset.
+    const versionRes = await sandbox.exec("kimiflare --version");
+    const hasKimi = versionRes.success && (versionRes.stdout ?? "").trim().length > 0;
+    if (hasKimi && !req.kimiflareInstall) {
+      log("kimiflare already installed in sandbox image", { workerId, version: (versionRes.stdout ?? "").trim() });
+    } else {
+      log("installing kimiflare in sandbox", { workerId, install: installSpec, reason: hasKimi ? "override requested" : "not present" });
+      const installRes = await sandbox.exec(`npm install -g --force ${installArg}`);
+      if (!installRes.success) {
+        log("kimiflare install failed (continuing with image-baked version)", {
+          workerId,
+          stderr: (installRes.stderr ?? "").slice(0, 300),
+        });
+      }
     }
 
     // 4. Write Cloudflare credentials so the kimiflare CLI inside can call
@@ -217,6 +235,7 @@ async function runWorker(
     });
     await sandbox.exec("mkdir -p /root/.config/kimiflare");
     await sandbox.exec(`cat > /root/.config/kimiflare/config.json << 'KIMICONFIG_EOF'\n${config}\nKIMICONFIG_EOF`);
+    log("config written", { workerId });
 
     // 5. Build the wrapped prompt and run kimiflare -p
     const wrapped = req.mode === "plan"
@@ -226,7 +245,15 @@ async function runWorker(
     const escapedPrompt = wrapped.replace(/'/g, `'\\''`);
     const kimiCmd = `cd /workspace/repo && kimiflare -p '${escapedPrompt}' --dangerously-allow-all --continue-on-limit`;
     log("running kimiflare", { workerId, cmdLength: kimiCmd.length });
-    const runRes = await sandbox.exec(kimiCmd);
+    let runRes;
+    try {
+      runRes = await sandbox.exec(kimiCmd);
+    } catch (execErr) {
+      const msg = execErr instanceof Error ? execErr.message : String(execErr);
+      log("sandbox.exec(kimiCmd) threw", { workerId, error: msg });
+      // Re-throw with context so the coordinator can show a useful message
+      throw new Error(`kimiflare execution failed inside Cloudflare Sandbox: ${msg}`);
+    }
     const rawOutput = (runRes.stdout ?? "").trim();
     log("kimiflare done", { workerId, exitCode: runRes.exitCode, success: runRes.success, stdoutLen: rawOutput.length });
 

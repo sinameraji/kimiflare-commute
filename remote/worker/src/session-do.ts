@@ -39,6 +39,10 @@ export class SessionDO implements DurableObject {
       return this.handleVerify();
     }
 
+    if (path.endsWith("/disconnect") && request.method === "POST") {
+      return this.handleDisconnect();
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -55,12 +59,13 @@ export class SessionDO implements DurableObject {
       sessionId: string;
       accountId: string;
       apiToken: string;
+      force?: boolean;
     };
 
-    const { owner, name, githubToken, userId, sessionId, accountId, apiToken } = body;
+    const { owner, name, githubToken, userId, sessionId, accountId, apiToken, force } = body;
     const githubUrl = `https://github.com/${owner}/${name}.git`;
 
-    log("handleSetup — start", { owner, name, userId, sessionId });
+    log("handleSetup — start", { owner, name, userId, sessionId, force: !!force });
 
     const STEPS = [
       "import",
@@ -111,23 +116,37 @@ export class SessionDO implements DurableObject {
     };
 
     // ── Fast path: check for existing session ─────────────────────────
-    const existing = await this.state.storage.get<SessionState>("state");
-    if (existing) {
-      log("handleSetup — existing state found", { sessionId: existing.sessionId });
+    if (!force) {
+      const existing = await this.state.storage.get<SessionState>("state");
+      if (existing) {
+        log("handleSetup — existing state found", { sessionId: existing.sessionId });
+        try {
+          const sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
+          const verifyRes = await sandbox.exec("test -d /workspace/repo && echo ok || echo missing");
+          if (verifyRes.stdout?.trim() === "ok") {
+            appendLog("Resuming existing session — repo verified");
+            log("handleSetup — repo verified, resuming");
+            await setProgress("finalize", "complete", "Session resumed");
+            return Response.json({ success: true, resumed: true, sessionId });
+          }
+          log("handleSetup — repo missing, clearing old state");
+          await this.state.storage.delete("state");
+        } catch (err) {
+          log("handleSetup — verify failed, falling back to full setup", err instanceof Error ? err.message : String(err));
+          await this.state.storage.delete("state");
+        }
+      }
+    } else {
+      log("handleSetup — force=true, skipping fast path");
+      appendLog("Force reset requested — cleaning up...");
+      await this.state.storage.delete("state");
+      await this.state.storage.delete("progress");
       try {
         const sandbox = await getSandbox(this.env.SANDBOX as any, sessionId);
-        const verifyRes = await sandbox.exec("test -d /workspace/repo && echo ok || echo missing");
-        if (verifyRes.stdout?.trim() === "ok") {
-          appendLog("Resuming existing session — repo verified");
-          log("handleSetup — repo verified, resuming");
-          await setProgress("finalize", "complete", "Session resumed");
-          return Response.json({ success: true, resumed: true, sessionId });
-        }
-        log("handleSetup — repo missing, clearing old state");
-        await this.state.storage.delete("state");
+        await sandbox.exec("rm -rf /workspace/repo");
+        appendLog("Old workspace removed");
       } catch (err) {
-        log("handleSetup — verify failed, falling back to full setup", err instanceof Error ? err.message : String(err));
-        await this.state.storage.delete("state");
+        log("handleSetup — force cleanup warning", err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -166,29 +185,24 @@ export class SessionDO implements DurableObject {
           await setProgress("import", "complete");
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("already exists")) {
-            log("Step 1 — artifact already exists, deleting and re-importing", { name: sessionId });
-            appendLog("Artifact exists — refreshing...");
-            try {
-              await this.env.ARTIFACTS!.delete(sessionId);
-              artifact = await this.env.ARTIFACTS!.import({
-                source: { url: githubUrl, branch: "main" },
-                target: { name: sessionId },
-              });
-              appendLog(`Artifact refreshed: ${artifact.name}`);
-              log("Step 1 — OK (refreshed)", artifact);
-              await setProgress("import", "complete");
-            } catch (refreshErr) {
-              const refreshMsg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
-              log("Step 1 — refresh failed, falling back to direct clone", refreshMsg);
-              appendLog(`Artifact refresh failed: ${refreshMsg}`);
-              appendLog("Falling back to direct GitHub clone");
-              await setProgress("import", "complete", "Artifact exists — using direct clone");
-            }
-          } else {
-            log("Step 1 — FAIL", msg);
-            await setProgress("import", "error", STEP_LABELS.import, msg);
-            throw err;
+          log("Step 1 — artifact import failed, attempting refresh", { name: sessionId, msg });
+          appendLog(`Artifact import issue: ${msg}`);
+          appendLog("Attempting to refresh artifact...");
+          try {
+            await this.env.ARTIFACTS!.delete(sessionId);
+            artifact = await this.env.ARTIFACTS!.import({
+              source: { url: githubUrl, branch: "main" },
+              target: { name: sessionId },
+            });
+            appendLog(`Artifact refreshed: ${artifact.name}`);
+            log("Step 1 — OK (refreshed)", artifact);
+            await setProgress("import", "complete");
+          } catch (refreshErr) {
+            const refreshMsg = refreshErr instanceof Error ? refreshErr.message : String(refreshErr);
+            log("Step 1 — refresh failed, falling back to direct clone", refreshMsg);
+            appendLog(`Artifact refresh failed: ${refreshMsg}`);
+            appendLog("Falling back to direct GitHub clone");
+            await setProgress("import", "complete", "Artifact unavailable — using direct clone");
           }
         }
 
@@ -257,6 +271,17 @@ export class SessionDO implements DurableObject {
         log("Step 4 — result", { success: cloneRes.success, exitCode: cloneRes.exitCode, stderr: cloneRes.stderr });
         if (!cloneRes.success) {
           throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);
+        }
+        // Ensure git remote points to GitHub so pull/push always use live source
+        const encodedToken = encodeURIComponent(githubToken);
+        const githubRemote = githubUrl.replace("https://", `https://${encodedToken}@`);
+        const originRes = await sandbox.exec(
+          `cd /workspace/repo && git remote set-url origin ${githubRemote}`
+        );
+        if (originRes.success) {
+          appendLog("Git remote set to GitHub origin");
+        } else {
+          appendLog("Warning: could not update git remote");
         }
         await setProgress("clone", "complete");
       } catch (err) {
@@ -377,5 +402,35 @@ export class SessionDO implements DurableObject {
     }
     log("handleVerify — OK", { userId: state.userId, sessionId: state.sessionId });
     return Response.json({ userId: state.userId, sessionId: state.sessionId });
+  }
+
+  private async handleDisconnect(): Promise<Response> {
+    log("handleDisconnect — start");
+    const state = await this.state.storage.get<SessionState>("state");
+
+    if (state?.artifactsRepo && this.env.ARTIFACTS) {
+      try {
+        await this.env.ARTIFACTS.delete(state.artifactsRepo.name);
+        log("handleDisconnect — artifact deleted", { name: state.artifactsRepo.name });
+      } catch (err) {
+        log("handleDisconnect — artifact delete warning", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    await this.state.storage.delete("state");
+    await this.state.storage.delete("progress");
+    log("handleDisconnect — DO storage cleared");
+
+    if (state) {
+      try {
+        const sandbox = await getSandbox(this.env.SANDBOX as any, state.sessionId);
+        await sandbox.exec("rm -rf /workspace/repo /root/.config/kimiflare");
+        log("handleDisconnect — sandbox cleaned");
+      } catch (err) {
+        log("handleDisconnect — sandbox cleanup warning", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    return Response.json({ success: true });
   }
 }

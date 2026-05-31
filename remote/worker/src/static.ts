@@ -470,13 +470,13 @@ export const INDEX_HTML = `<!DOCTYPE html>
       }
     }
 
-    async function setupRepo(owner, name) {
-      clog('setupRepo — starting', { owner, name });
+    async function setupRepo(owner, name, force = false) {
+      clog('setupRepo — starting', { owner, name, force });
       lastLogs = [];
       app.innerHTML = \`
         <div id="setup" class="screen active">
           <div class="setup-wrap">
-            <h1>Setting up</h1>
+            <h1>\${force ? 'Resetting' : 'Setting up'}</h1>
             <p class="subtitle">Cloning <strong>\${owner}/\${name}</strong> into a Cloudflare Sandbox.</p>
             <div id="progress-list" class="progress-list"></div>
             <div id="setup-error" class="setup-error" style="display:none;"></div>
@@ -488,12 +488,12 @@ export const INDEX_HTML = `<!DOCTYPE html>
 
       let sessionId;
       try {
-        clog('setupRepo — POST /api/setup', { owner, name });
+        clog('setupRepo — POST /api/setup', { owner, name, force });
         const res = await fetch('/api/setup', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ owner, name }),
+          body: JSON.stringify({ owner, name, force }),
         });
         clog('setupRepo — /api/setup response', { status: res.status, ok: res.ok });
 
@@ -571,7 +571,11 @@ export const INDEX_HTML = `<!DOCTYPE html>
         <div id="terminal-screen" class="screen active">
           <div class="term-header">
             <span>\${owner}/\${name}</span>
-            <button class="btn-ghost" onclick="renderRepoPicker()">Close</button>
+            <div style="display:flex;gap:0.5rem;">
+              <button class="btn-ghost" onclick="setupRepo('\${owner}', '\${name}', true)">Reset & Reclone</button>
+              <button class="btn-ghost" onclick="disconnectRepo('\${sessionId}', '\${owner}', '\${name}')" style="color:var(--error);">Disconnect</button>
+              <button class="btn-ghost" onclick="renderRepoPicker()">Close</button>
+            </div>
           </div>
           <div id="terminal-container"></div>
         </div>
@@ -633,6 +637,29 @@ export const INDEX_HTML = `<!DOCTYPE html>
       currentUser = null;
       setNav(null);
       renderLanding();
+    }
+
+    async function disconnectRepo(sessionId, owner, name) {
+      if (!confirm('Disconnect this repository? This deletes the sandbox and artifact copy, but will not affect your GitHub repository.')) {
+        return;
+      }
+      clog('disconnectRepo — starting', { sessionId, owner, name });
+      try {
+        const res = await fetch(\`/api/disconnect/\${sessionId}\`, {
+          method: 'POST',
+          credentials: 'include',
+        });
+        const data = await res.json();
+        if (data.success) {
+          clog('disconnectRepo — success');
+          renderRepoPicker();
+        } else {
+          alert('Disconnect failed: ' + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        clog('disconnectRepo — ERROR', err.message);
+        alert('Disconnect failed: ' + err.message);
+      }
     }
 
     function escapeHtml(str) {

@@ -202,9 +202,10 @@ app.post("/api/setup", async (c) => {
   const body = await c.req.json() as {
     owner: string;
     name: string;
+    force?: boolean;
   };
 
-  log("/api/setup", { owner: body.owner, name: body.name, userId: auth.userId });
+  log("/api/setup", { owner: body.owner, name: body.name, userId: auth.userId, force: !!body.force });
 
   // Log env bindings at the worker level
   log("/api/setup — env bindings", {
@@ -233,6 +234,7 @@ app.post("/api/setup", async (c) => {
       sessionId,
       accountId: c.env.ACCOUNT_ID,
       apiToken: c.env.CF_API_TOKEN,
+      force: body.force,
     }),
     headers: { "Content-Type": "application/json" },
   }));
@@ -268,6 +270,44 @@ app.get("/api/setup/progress/:sessionId", async (c) => {
   } catch (err) {
     log("/api/setup/progress — FAIL", err instanceof Error ? err.message : String(err));
     return c.json({ error: "Failed to fetch progress" }, 500);
+  }
+});
+
+// ── API: Disconnect repo (delete artifact, DO state, sandbox) ───────
+app.post("/api/disconnect/:sessionId", async (c) => {
+  const auth = await requireAuth(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const sessionId = c.req.param("sessionId");
+  log("/api/disconnect", { sessionId, userId: auth.userId });
+
+  // Verify ownership
+  const doId = c.env.SESSION_DO.idFromName(sessionId);
+  const doStub = c.env.SESSION_DO.get(doId);
+  let verifyRes: Response;
+  try {
+    verifyRes = await doStub.fetch(new Request("http://internal/verify"));
+  } catch (err) {
+    log("/api/disconnect — verify FAIL", err instanceof Error ? err.message : String(err));
+    return c.json({ error: "Session unreachable" }, 500);
+  }
+  if (!verifyRes.ok) {
+    log("/api/disconnect — verify NOT FOUND");
+    return c.json({ error: "Session not found" }, 404);
+  }
+  const verify = (await verifyRes.json()) as { userId: string; sessionId: string };
+  if (verify.userId !== auth.userId) {
+    log("/api/disconnect — verify FORBIDDEN", { expected: auth.userId, got: verify.userId });
+    return c.json({ error: "Forbidden" }, 403);
+  }
+
+  try {
+    const res = await doStub.fetch(new Request("http://internal/disconnect", { method: "POST" }));
+    const data = await res.json();
+    return c.json(data);
+  } catch (err) {
+    log("/api/disconnect — FAIL", err instanceof Error ? err.message : String(err));
+    return c.json({ error: "Disconnect failed" }, 500);
   }
 });
 

@@ -1,36 +1,41 @@
 /**
- * Worker endpoint handler — receives mission briefs from the KimiFlare
- * coordinator, runs a lightweight agent via Workers AI, and returns
- * structured findings (plan mode) or opens a PR (execute mode).
+ * Worker endpoint handler — receives a mission brief from the KimiFlare
+ * coordinator and runs a full kimiflare agent loop inside a Cloudflare
+ * Sandbox, with the user's repo cloned in. This is the real thing: the
+ * worker can read code, grep, run commands, and (in execute mode) commit
+ * and open a PR.
+ *
+ * Architecture (per request):
+ *   1. Import repo into Artifacts (fallback: direct GitHub clone)
+ *   2. Get a Sandbox instance keyed by a unique workerId
+ *   3. `git clone` the repo into /workspace/repo
+ *   4. Write Cloudflare credentials to /root/.config/kimiflare/config.json
+ *   5. Exec `kimiflare -p "<wrapped task>" --dangerously-allow-all` inside
+ *      the repo. This runs the full agent loop with all tools.
+ *   6. Parse the structured JSON the wrapper prompt asks the model to emit
+ *   7. (Execute mode) git add/commit/push, open PR via GitHub API
+ *   8. rm workspace, return findings/recommendations to the coordinator
  */
 
 import type { Env } from "./types.js";
-import {
-  getRef,
-  createRef,
-  createBlob,
-  createTree,
-  createCommit,
-  updateRef,
-  createPullRequest,
-} from "./github.js";
+import { getSandbox } from "@cloudflare/sandbox";
+import { createPullRequest } from "./github.js";
 
 export interface WorkerRequest {
   mode: "plan" | "execute";
   task: string;
   context?: string;
   budget?: { maxCostUsd?: number };
-  outputFormat?: "structured" | "text";
-  tools?: "all" | "read-only";
   model?: string;
-  branchName?: string;
-  baseBranch?: string;
-  prTitle?: string;
-  prBody?: string;
-  // Execute mode only:
+  // Required for sandbox-driven workers:
   githubToken?: string;
   owner?: string;
   repo?: string;
+  baseBranch?: string;
+  // Execute mode only:
+  branchName?: string;
+  prTitle?: string;
+  prBody?: string;
 }
 
 export interface WorkerResponse {
@@ -51,6 +56,8 @@ export interface WorkerResponse {
   tokensUsed: number;
   reasoning: string;
   prUrl?: string;
+  branchName?: string;
+  rawOutput?: string;
   error?: string;
 }
 
@@ -93,16 +100,25 @@ export async function handleWorkerRequest(
   if (!body.task || !body.mode) {
     return c.json({ error: "Missing required fields: task, mode" }, 400);
   }
+  if (!body.githubToken || !body.owner || !body.repo) {
+    return c.json(
+      { error: "Missing required fields for sandbox-driven workers: githubToken, owner, repo" },
+      400,
+    );
+  }
+  if (!c.env.SANDBOX) {
+    return c.json({ error: "SANDBOX binding not configured on this Worker" }, 500);
+  }
+  if (!c.env.ACCOUNT_ID || !c.env.CF_API_TOKEN) {
+    return c.json({ error: "ACCOUNT_ID or CF_API_TOKEN not configured" }, 500);
+  }
 
   const workerId = `worker-${crypto.randomUUID().slice(0, 8)}`;
-  log("request", { workerId, mode: body.mode, task: body.task.slice(0, 100) });
+  log("request", { workerId, mode: body.mode, task: body.task.slice(0, 100), repo: `${body.owner}/${body.repo}` });
 
   try {
-    const result =
-      body.mode === "execute"
-        ? await runExecuteWorker(c.env, body, workerId)
-        : await runPlanWorker(c.env, body, workerId);
-    log("completed", { workerId, status: result.status });
+    const result = await runWorker(c.env, body, workerId);
+    log("completed", { workerId, status: result.status, prUrl: result.prUrl });
     return c.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -111,207 +127,220 @@ export async function handleWorkerRequest(
   }
 }
 
-/** Call Cloudflare Workers AI and return the raw text response + token estimate. */
-async function callAi(
-  env: Env,
-  model: string,
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<{ rawText: string; tokensUsed: number; costUsd: number }> {
-  const accountId = env.ACCOUNT_ID;
-  const apiToken = env.CF_API_TOKEN;
-  if (!accountId || !apiToken) {
-    throw new Error("ACCOUNT_ID or CF_API_TOKEN not configured");
-  }
-
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      max_tokens: 4096,
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`AI API returned ${res.status}: ${text.slice(0, 200)}`);
-  }
-
-  const data = (await res.json()) as { result?: { response?: string } };
-  const rawText = data.result?.response ?? "";
-  const tokensUsed = Math.ceil(rawText.length / 4);
-  const costUsd = (tokensUsed / 1_000_000) * 1.0;
-  return { rawText, tokensUsed, costUsd };
-}
-
-/** Extract the first JSON object from a model response. */
-function extractJson<T>(rawText: string): Partial<T> {
-  try {
-    const match = rawText.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]) as Partial<T>;
-  } catch {
-    // fall through
-  }
-  return {};
-}
-
-async function runPlanWorker(
+async function runWorker(
   env: Env,
   req: WorkerRequest,
   workerId: string,
 ): Promise<WorkerResponse> {
-  const model = req.model ?? "@cf/moonshotai/kimi-k2.6";
-
-  const systemPrompt = `You are a research assistant. Your job is to investigate the user's request and return a structured JSON response.
-
-You must respond with ONLY a JSON object in this exact format:
-{
-  "findings": [
-    {
-      "topic": "Short topic name",
-      "summary": "Detailed summary of what you found",
-      "confidence": "high|medium|low",
-      "sources": ["source name or URL"],
-      "relevance": "critical|high|medium|low"
-    }
-  ],
-  "recommendations": ["actionable recommendation 1", "actionable recommendation 2"],
-  "filesRead": ["files you would read"],
-  "webSources": ["URLs you would reference"],
-  "reasoning": "Your step-by-step reasoning process"
-}
-
-Rules:
-- Be thorough but concise
-- Cite specific sources when possible
-- Provide actionable recommendations
-- Estimate confidence honestly`;
-
-  const userPrompt = `Task: ${req.task}\n\nContext: ${req.context ?? "No additional context provided."}`;
-
-  const { rawText, tokensUsed, costUsd } = await callAi(env, model, systemPrompt, userPrompt);
-  const parsed = extractJson<WorkerResponse>(rawText);
-
-  return {
-    workerId,
-    status: "completed",
-    task: req.task,
-    findings: parsed.findings ?? [
-      {
-        topic: req.task.slice(0, 50),
-        summary: rawText.slice(0, 500) || "No structured findings available.",
-        confidence: "medium",
-        sources: [],
-        relevance: "high",
-      },
-    ],
-    recommendations: parsed.recommendations ?? [],
-    filesRead: parsed.filesRead ?? [],
-    webSources: parsed.webSources ?? [],
-    costUsd,
-    tokensUsed,
-    reasoning: parsed.reasoning ?? rawText.slice(0, 1000),
-  };
-}
-
-interface ExecutePlan {
-  files: Array<{ path: string; content: string }>;
-  commitMessage: string;
-  reasoning?: string;
-}
-
-async function runExecuteWorker(
-  env: Env,
-  req: WorkerRequest,
-  workerId: string,
-): Promise<WorkerResponse> {
-  if (!req.githubToken || !req.owner || !req.repo) {
-    return emptyResponse(
-      workerId,
-      req.task,
-      "Execute mode requires githubToken, owner, and repo.",
-    );
-  }
-
-  const model = req.model ?? "@cf/moonshotai/kimi-k2.6";
+  const owner = req.owner!;
+  const repo = req.repo!;
+  const githubToken = req.githubToken!;
   const baseBranch = req.baseBranch ?? "main";
-  const branchName = req.branchName ?? `kimiflare/worker-${workerId}`;
+  const githubUrl = `https://github.com/${owner}/${repo}.git`;
 
-  const systemPrompt = `You are a coding agent. Given a task, produce the file changes needed to accomplish it.
-
-You must respond with ONLY a JSON object in this exact format:
-{
-  "files": [{ "path": "relative/path/to/file", "content": "full new file contents" }],
-  "commitMessage": "concise commit message",
-  "reasoning": "why these changes accomplish the task"
-}
-
-Rules:
-- Provide the COMPLETE new contents for each file you change (not a diff).
-- Keep changes minimal and focused on the task.
-- Use forward-slash paths relative to the repo root.`;
-
-  const userPrompt = `Task: ${req.task}\n\nContext: ${req.context ?? "No additional context provided."}`;
-
-  const { rawText, tokensUsed, costUsd } = await callAi(env, model, systemPrompt, userPrompt);
-  const plan = extractJson<ExecutePlan>(rawText);
-
-  if (!plan.files || plan.files.length === 0) {
-    return emptyResponse(workerId, req.task, "Model did not produce any file changes.");
+  // 1. Import repo into Artifacts (with fallback to direct GitHub clone)
+  let artifact: { name: string; remote: string } | undefined;
+  let artifactToken: string | undefined;
+  if (env.ARTIFACTS) {
+    try {
+      artifact = await env.ARTIFACTS.import({
+        source: { url: githubUrl, branch: baseBranch },
+        target: { name: workerId },
+      });
+      log("artifact imported", { workerId, name: artifact.name });
+      const tokenRes = await env.ARTIFACTS.get(workerId).createToken("read-write", 3600);
+      artifactToken = tokenRes.plaintext;
+    } catch (err) {
+      log("artifact import failed — falling back to direct clone", { error: err instanceof Error ? err.message : String(err) });
+      artifact = undefined;
+      artifactToken = undefined;
+    }
   }
 
-  const owner = req.owner;
-  const repo = req.repo;
-  const token = req.githubToken;
+  // 2. Get a Sandbox instance for this worker
+  const sandbox = await getSandbox(env.SANDBOX as any, workerId);
+  log("sandbox acquired", { workerId });
 
-  // Build the commit via the Git Data API.
-  const baseSha = await getRef({ owner, repo, branch: baseBranch, token });
-  await createRef({ owner, repo, branch: branchName, sha: baseSha, token });
+  try {
+    // 3. Clone the repo into the sandbox
+    let cloneUrl: string;
+    if (artifact && artifactToken) {
+      cloneUrl = artifact.remote.replace("https://", `https://token:${encodeURIComponent(artifactToken)}@`);
+    } else {
+      cloneUrl = githubUrl.replace("https://", `https://${encodeURIComponent(githubToken)}@`);
+    }
+    const cloneRes = await sandbox.exec(`rm -rf /workspace/repo && git clone --depth 50 ${cloneUrl} /workspace/repo`);
+    if (!cloneRes.success) {
+      throw new Error(`git clone failed: ${(cloneRes.stderr || cloneRes.stdout || "").slice(0, 300)}`);
+    }
+    // Ensure remote uses the GitHub token so push works in execute mode
+    const encodedGhToken = encodeURIComponent(githubToken);
+    const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
+    await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
+    await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
 
-  const fileEntries = await Promise.all(
-    plan.files.map(async (f) => ({
-      path: f.path,
-      blobSha: await createBlob({ owner, repo, content: f.content, token }),
-    })),
-  );
+    // 4. Write Cloudflare credentials so the kimiflare CLI inside can call Workers AI
+    const config = JSON.stringify({
+      accountId: env.ACCOUNT_ID,
+      apiToken: env.CF_API_TOKEN,
+      model: req.model ?? "@cf/moonshotai/kimi-k2.6",
+    });
+    await sandbox.exec("mkdir -p /root/.config/kimiflare");
+    await sandbox.exec(`cat > /root/.config/kimiflare/config.json << 'KIMICONFIG_EOF'\n${config}\nKIMICONFIG_EOF`);
 
-  const treeSha = await createTree({ owner, repo, baseTreeSha: baseSha, files: fileEntries, token });
-  const commitSha = await createCommit({
-    owner,
-    repo,
-    message: plan.commitMessage ?? `kimiflare worker: ${req.task.slice(0, 60)}`,
-    treeSha,
-    parentShas: [baseSha],
-    token,
-  });
-  await updateRef({ owner, repo, branch: branchName, sha: commitSha, token });
+    // 5. Build the wrapped prompt and run kimiflare -p
+    const wrapped = req.mode === "plan"
+      ? wrapPlanPrompt(req.task, req.context)
+      : wrapExecutePrompt(req.task, req.context);
+    // Single-quote escape: replace each ' with '\''
+    const escapedPrompt = wrapped.replace(/'/g, `'\\''`);
+    const kimiCmd = `cd /workspace/repo && kimiflare -p '${escapedPrompt}' --dangerously-allow-all --continue-on-limit`;
+    log("running kimiflare", { workerId, cmdLength: kimiCmd.length });
+    const runRes = await sandbox.exec(kimiCmd);
+    const rawOutput = (runRes.stdout ?? "").trim();
+    log("kimiflare done", { workerId, exitCode: runRes.exitCode, success: runRes.success, stdoutLen: rawOutput.length });
 
-  const pr = await createPullRequest({
-    owner,
-    repo,
-    title: req.prTitle ?? plan.commitMessage ?? `kimiflare worker: ${req.task.slice(0, 60)}`,
-    body: req.prBody ?? plan.reasoning ?? req.task,
-    head: branchName,
-    base: baseBranch,
-    token,
-  });
+    // 6. Parse structured JSON the wrapper asked the model to emit
+    const parsed = extractJsonBlock(rawOutput) ?? {};
 
-  return {
-    workerId,
-    status: "completed",
-    task: req.task,
-    findings: [],
-    recommendations: [],
-    filesRead: plan.files.map((f) => f.path),
-    webSources: [],
-    costUsd,
-    tokensUsed,
-    reasoning: plan.reasoning ?? rawText.slice(0, 1000),
-    prUrl: pr.html_url,
-  };
+    // 7. Execute mode: commit + push + open PR
+    let prUrl: string | undefined;
+    let branchName: string | undefined;
+    if (req.mode === "execute") {
+      branchName = req.branchName ?? `kimiflare/${workerId}`;
+      // Stage any changes the agent made
+      const diffRes = await sandbox.exec("cd /workspace/repo && git status --porcelain");
+      const hasChanges = (diffRes.stdout ?? "").trim().length > 0;
+      if (hasChanges) {
+        const commitMsg = (parsed.commitMessage as string) ?? `kimiflare worker: ${req.task.slice(0, 60)}`;
+        const commitMsgEscaped = commitMsg.replace(/'/g, `'\\''`);
+        const branchRes = await sandbox.exec(`cd /workspace/repo && git checkout -b ${shellEscapeArg(branchName)}`);
+        if (!branchRes.success) throw new Error(`git checkout -b failed: ${branchRes.stderr || branchRes.stdout}`);
+        const addRes = await sandbox.exec(`cd /workspace/repo && git add -A`);
+        if (!addRes.success) throw new Error(`git add failed: ${addRes.stderr || addRes.stdout}`);
+        const commitRes = await sandbox.exec(`cd /workspace/repo && git commit -m '${commitMsgEscaped}'`);
+        if (!commitRes.success) throw new Error(`git commit failed: ${commitRes.stderr || commitRes.stdout}`);
+        const pushRes = await sandbox.exec(`cd /workspace/repo && git push -u origin ${shellEscapeArg(branchName)}`);
+        if (!pushRes.success) throw new Error(`git push failed: ${(pushRes.stderr || pushRes.stdout).slice(0, 300)}`);
+        const pr = await createPullRequest({
+          owner, repo,
+          title: req.prTitle ?? commitMsg,
+          body: req.prBody ?? `Generated by kimiflare worker ${workerId}.\n\nTask:\n> ${req.task}`,
+          head: branchName,
+          base: baseBranch,
+          token: githubToken,
+        });
+        prUrl = pr.html_url;
+      } else {
+        log("execute mode: agent made no file changes", { workerId });
+      }
+    }
+
+    // 8. Build response
+    const findings = Array.isArray(parsed.findings) && parsed.findings.length > 0
+      ? parsed.findings
+      : [{
+          topic: req.task.slice(0, 60),
+          summary: rawOutput.slice(0, 1500) || "(no output captured)",
+          confidence: "medium" as const,
+          sources: [],
+          relevance: "high" as const,
+        }];
+    const recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
+    const filesRead = Array.isArray(parsed.filesRead) ? parsed.filesRead : [];
+    // Rough estimates — Workers AI accounting flows through the model's own
+    // billing; this is a token-count heuristic for the coordinator's UI.
+    const tokensUsed = Math.ceil(rawOutput.length / 4);
+    const costUsd = (tokensUsed / 1_000_000) * 1.0;
+
+    return {
+      workerId,
+      status: runRes.success ? "completed" : "failed",
+      task: req.task,
+      findings,
+      recommendations,
+      filesRead,
+      webSources: [],
+      costUsd,
+      tokensUsed,
+      reasoning: (parsed.reasoning as string) ?? rawOutput.slice(0, 2000),
+      prUrl,
+      branchName,
+      rawOutput,
+      error: runRes.success ? undefined : (runRes.stderr ?? "kimiflare exited non-zero").slice(0, 500),
+    };
+  } finally {
+    // 9. Cleanup — best-effort; non-fatal
+    try {
+      await sandbox.exec("rm -rf /workspace/repo /root/.config/kimiflare");
+    } catch (err) {
+      log("cleanup warning (sandbox files)", err instanceof Error ? err.message : String(err));
+    }
+    if (env.ARTIFACTS && artifact) {
+      try {
+        await env.ARTIFACTS.delete(workerId);
+      } catch (err) {
+        log("cleanup warning (artifact)", err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+}
+
+function wrapPlanPrompt(task: string, context: string | undefined): string {
+  return [
+    "You are a research worker. Investigate the following task in this codebase.",
+    "You may read files, grep, list, and inspect git history — but do NOT modify anything.",
+    "",
+    `Task: ${task}`,
+    context ? `\nAdditional context: ${context}` : "",
+    "",
+    "When you are done investigating, end your reply with a single fenced JSON block in EXACTLY this format:",
+    "```json",
+    "{",
+    '  "findings": [{"topic": "short label", "summary": "what you found", "confidence": "high|medium|low", "sources": ["path/to/file:line", "..."], "relevance": "critical|high|medium|low"}],',
+    '  "recommendations": ["actionable rec 1", "actionable rec 2"],',
+    '  "filesRead": ["path/to/file", "..."],',
+    '  "reasoning": "1-3 sentences of why these findings matter"',
+    "}",
+    "```",
+  ].join("\n");
+}
+
+function wrapExecutePrompt(task: string, context: string | undefined): string {
+  return [
+    "You are an executor worker. Implement the following task in this codebase.",
+    "Read whatever code you need, then make the edits. Keep changes minimal and focused.",
+    "Do NOT commit or push — the worker harness will commit your changes after you finish.",
+    "",
+    `Task: ${task}`,
+    context ? `\nAdditional context: ${context}` : "",
+    "",
+    "When you are done, end your reply with a single fenced JSON block in EXACTLY this format:",
+    "```json",
+    "{",
+    '  "commitMessage": "concise commit message",',
+    '  "filesRead": ["path/to/file", "..."],',
+    '  "reasoning": "1-3 sentences of what you changed and why"',
+    "}",
+    "```",
+  ].join("\n");
+}
+
+/** Pull the first {...} or ```json fenced block out of the model's stdout. */
+function extractJsonBlock(text: string): Record<string, unknown> | null {
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
+  const candidates: string[] = [];
+  if (fenced && fenced[1]) candidates.push(fenced[1].trim());
+  const last = text.lastIndexOf("{");
+  if (last >= 0) candidates.push(text.slice(last));
+  for (const c of candidates) {
+    try { return JSON.parse(c) as Record<string, unknown>; } catch { /* try next */ }
+  }
+  return null;
+}
+
+function shellEscapeArg(s: string): string {
+  // Branch names from us are kebab-case + `/`, but be defensive.
+  if (/^[a-zA-Z0-9._/-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }

@@ -300,31 +300,30 @@ async function runWorker(
       error: runRes.success ? undefined : (runRes.stderr ?? "kimiflare exited non-zero").slice(0, 500),
     };
   } finally {
-    // 9. Cleanup — best-effort; non-fatal
+    // 9. Cleanup — best-effort; non-fatal.
+    // `sandbox.destroy()` is the documented way to release the underlying
+    // container; @cloudflare/sandbox README warns: "You MUST call
+    // sandbox.destroy() when done to avoid resource leaks". Without it the
+    // Durable Object keeps the container slot until the platform recycles
+    // it idle, which under parallel /worker fan-out can exhaust
+    // max_instances. The `rm -rf` is belt-and-braces; destroy alone tears
+    // down the workspace too.
     try {
       await sandbox.exec("rm -rf /workspace/repo /root/.config/kimiflare");
     } catch (err) {
       log("cleanup warning (sandbox files)", err instanceof Error ? err.message : String(err));
     }
-    // Speculative: ask the Sandbox to release the underlying container so we
-    // don't sit on an instance slot until the platform reclaims it. The
-    // @cloudflare/sandbox API may or may not expose this — try common names;
-    // harmless no-op if none exist.
-    for (const m of ["destroy", "stop", "kill", "shutdown"] as const) {
-      const fn = (sandbox as unknown as Record<string, unknown>)[m];
-      if (typeof fn === "function") {
-        try {
-          await (fn as () => Promise<unknown>).call(sandbox);
-          log("sandbox released", { workerId, via: m });
-          break;
-        } catch (err) {
-          log(`sandbox.${m} threw`, err instanceof Error ? err.message : String(err));
-        }
-      }
+    try {
+      await sandbox.destroy();
+      log("sandbox destroyed", { workerId });
+    } catch (err) {
+      log("sandbox.destroy() threw — slot will reclaim on idle timeout instead",
+          err instanceof Error ? err.message : String(err));
     }
     if (env.ARTIFACTS && artifact) {
       try {
         await env.ARTIFACTS.delete(workerId);
+        log("artifact deleted", { workerId });
       } catch (err) {
         log("cleanup warning (artifact)", err instanceof Error ? err.message : String(err));
       }

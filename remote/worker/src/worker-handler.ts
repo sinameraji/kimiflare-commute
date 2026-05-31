@@ -42,6 +42,11 @@ export interface WorkerRequest {
    *  "github:sinameraji/kimiflare#feat/some-branch". When omitted, the image's
    *  pre-installed kimiflare (built into the Dockerfile) is used. */
   kimiflareInstall?: string;
+  /** User's Cloudflare credentials. When set, the in-sandbox kimiflare is
+   *  configured with these so worker LLM calls bill the USER's account, not
+   *  the Commute operator's. Falls back to the operator's env creds. */
+  userAccountId?: string;
+  userApiToken?: string;
 }
 
 export interface WorkerResponse {
@@ -200,10 +205,13 @@ async function runWorker(
       }
     }
 
-    // 4. Write Cloudflare credentials so the kimiflare CLI inside can call Workers AI
+    // 4. Write Cloudflare credentials so the kimiflare CLI inside can call
+    // Workers AI. Prefer the user's creds (so they're billed for their own
+    // worker runs); fall back to the operator's env if the client didn't
+    // send them (older clients).
     const config = JSON.stringify({
-      accountId: env.ACCOUNT_ID,
-      apiToken: env.CF_API_TOKEN,
+      accountId: req.userAccountId ?? env.ACCOUNT_ID,
+      apiToken: req.userApiToken ?? env.CF_API_TOKEN,
       model: req.model ?? "@cf/moonshotai/kimi-k2.6",
     });
     await sandbox.exec("mkdir -p /root/.config/kimiflare");

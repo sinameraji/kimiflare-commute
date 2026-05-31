@@ -215,7 +215,7 @@ async function runWorker(
       log("kimiflare already installed in sandbox image", { workerId, version: (versionRes.stdout ?? "").trim() });
     } else {
       log("installing kimiflare in sandbox", { workerId, install: installSpec, reason: hasKimi ? "override requested" : "not present" });
-      const installRes = await sandbox.exec(`npm install -g --force ${installArg}`);
+      const installRes = await sandbox.exec(`npm install -g --force --ignore-scripts ${installArg}`);
       if (!installRes.success) {
         log("kimiflare install failed (continuing with image-baked version)", {
           workerId,

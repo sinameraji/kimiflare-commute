@@ -190,19 +190,20 @@ async function runWorker(
     await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
     await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
 
-    // 3b. (Optional) Override the in-sandbox kimiflare with a specific version
-    // or git ref. Required if the user is iterating on un-published CLI code
-    // and wants the worker to run THAT code instead of the image-baked one.
-    if (req.kimiflareInstall) {
-      const installArg = shellEscapeArg(req.kimiflareInstall);
-      log("installing kimiflare override", { workerId, install: req.kimiflareInstall });
-      const installRes = await sandbox.exec(`npm install -g ${installArg}`);
-      if (!installRes.success) {
-        log("kimiflare install failed (continuing with image-baked version)", {
-          workerId,
-          stderr: (installRes.stderr ?? "").slice(0, 300),
-        });
-      }
+    // 3b. Ensure the in-sandbox kimiflare is current. End users always get
+    // the latest published version; devs/CI can pin via the
+    // `kimiflareInstall` request field (e.g. KIMIFLARE_CLI_REF env on the
+    // client side). Non-fatal — if the install fails we continue with the
+    // image-baked version.
+    const installSpec = req.kimiflareInstall ?? "kimiflare@latest";
+    const installArg = shellEscapeArg(installSpec);
+    log("installing kimiflare in sandbox", { workerId, install: installSpec });
+    const installRes = await sandbox.exec(`npm install -g ${installArg}`);
+    if (!installRes.success) {
+      log("kimiflare install failed (continuing with image-baked version)", {
+        workerId,
+        stderr: (installRes.stderr ?? "").slice(0, 300),
+      });
     }
 
     // 4. Write Cloudflare credentials so the kimiflare CLI inside can call

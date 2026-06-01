@@ -70,13 +70,15 @@ export interface WorkerResponse {
   branchName?: string;
   rawOutput?: string;
   error?: string;
+  /** Phase timing breakdown for debugging cold-start issues. */
+  phases?: Array<{ name: string; ms: number }>;
 }
 
 function log(label: string, data?: unknown) {
   console.log(`[WorkerEndpoint] ${label}:`, JSON.stringify(data, null, 2));
 }
 
-function emptyResponse(workerId: string, task: string, error: string): WorkerResponse {
+function emptyResponse(workerId: string, task: string, error: string, phases?: Array<{ name: string; ms: number }>): WorkerResponse {
   return {
     workerId,
     status: "failed",
@@ -89,6 +91,7 @@ function emptyResponse(workerId: string, task: string, error: string): WorkerRes
     tokensUsed: 0,
     reasoning: "",
     error,
+    phases,
   };
 }
 
@@ -151,6 +154,15 @@ async function runWorker(
   req: WorkerRequest,
   workerId: string,
 ): Promise<WorkerResponse> {
+  const startMs = Date.now();
+  const phases: Array<{ name: string; ms: number }> = [];
+  const mark = (name: string) => {
+    const now = Date.now();
+    phases.push({ name, ms: now - startMs });
+    log(`phase: ${name}`, { workerId, elapsedMs: now - startMs });
+  };
+
+  try {
   const owner = req.owner!;
   const repo = req.repo!;
   const githubToken = req.githubToken!;
@@ -175,10 +187,11 @@ async function runWorker(
       artifactToken = undefined;
     }
   }
+  mark("artifact-import");
 
   // 2. Get a Sandbox instance for this worker
   const sandbox = await getSandbox(env.SANDBOX as any, workerId);
-  log("sandbox acquired", { workerId });
+  mark("sandbox-acquire");
 
   try {
     // 3. Clone the repo into the sandbox
@@ -198,6 +211,7 @@ async function runWorker(
     const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
     await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
     await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
+    mark("clone");
 
     // 3b. Ensure the in-sandbox kimiflare is current. End users always get
     // the latest published version; devs/CI can pin via the
@@ -235,7 +249,7 @@ async function runWorker(
     });
     await sandbox.exec("mkdir -p /root/.config/kimiflare");
     await sandbox.exec(`cat > /root/.config/kimiflare/config.json << 'KIMICONFIG_EOF'\n${config}\nKIMICONFIG_EOF`);
-    log("config written", { workerId });
+    mark("install-config");
 
     // 5. Build the wrapped prompt and run kimiflare -p
     const wrapped = req.mode === "plan"
@@ -255,6 +269,7 @@ async function runWorker(
       throw new Error(`kimiflare execution failed inside Cloudflare Sandbox: ${msg}`);
     }
     const rawOutput = (runRes.stdout ?? "").trim();
+    mark("agent-run");
     log("kimiflare done", { workerId, exitCode: runRes.exitCode, success: runRes.success, stdoutLen: rawOutput.length });
 
     // 6. Parse structured JSON the wrapper asked the model to emit
@@ -310,6 +325,7 @@ async function runWorker(
     const tokensUsed = Math.ceil(rawOutput.length / 4);
     const costUsd = (tokensUsed / 1_000_000) * 1.0;
 
+    mark("total");
     return {
       workerId,
       status: runRes.success ? "completed" : "failed",
@@ -325,7 +341,12 @@ async function runWorker(
       branchName,
       rawOutput,
       error: runRes.success ? undefined : (runRes.stderr ?? "kimiflare exited non-zero").slice(0, 500),
+      phases,
     };
+  } catch (err) {
+    mark("total");
+    const message = err instanceof Error ? err.message : String(err);
+    return emptyResponse(workerId, req.task, message, phases);
   } finally {
     // 9. Cleanup — best-effort; non-fatal.
     // `sandbox.destroy()` is the documented way to release the underlying
@@ -361,12 +382,13 @@ async function runWorker(
 function wrapPlanPrompt(task: string, context: string | undefined): string {
   return [
     "You are a research worker. Investigate the following task in this codebase.",
-    "You may read files, grep, list, and inspect git history — but do NOT modify anything.",
+    "Use read, grep, bash, and web-search tools to explore. Do NOT modify files.",
+    "CRITICAL: Do NOT use tasks_set. Do NOT create todo lists or planning tasks. Just explore and read directly.",
     "",
     `Task: ${task}`,
     context ? `\nAdditional context: ${context}` : "",
     "",
-    "When you are done investigating, end your reply with a single fenced JSON block in EXACTLY this format:",
+    "When you are done investigating, end your reply with a single fenced JSON block in EXACTLY this format (no extra text after it):",
     "```json",
     "{",
     '  "findings": [{"topic": "short label", "summary": "what you found", "confidence": "high|medium|low", "sources": ["path/to/file:line", "..."], "relevance": "critical|high|medium|low"}],',
@@ -383,11 +405,12 @@ function wrapExecutePrompt(task: string, context: string | undefined): string {
     "You are an executor worker. Implement the following task in this codebase.",
     "Read whatever code you need, then make the edits. Keep changes minimal and focused.",
     "Do NOT commit or push — the worker harness will commit your changes after you finish.",
+    "CRITICAL: Do NOT use tasks_set. Do NOT create todo lists or planning tasks. Just read and edit directly.",
     "",
     `Task: ${task}`,
     context ? `\nAdditional context: ${context}` : "",
     "",
-    "When you are done, end your reply with a single fenced JSON block in EXACTLY this format:",
+    "When you are done, end your reply with a single fenced JSON block in EXACTLY this format (no extra text after it):",
     "```json",
     "{",
     '  "commitMessage": "concise commit message",',

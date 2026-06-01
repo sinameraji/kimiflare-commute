@@ -265,7 +265,17 @@ export async function runWorker(
     // Single-quote escape: replace each ' with '\''
     const escapedPrompt = wrapped.replace(/'/g, `'\\''`);
     const kimiCmd = `cd /workspace/repo && kimiflare -p '${escapedPrompt}' --dangerously-allow-all --continue-on-limit`;
-    log("running kimiflare", { workerId, cmdLength: kimiCmd.length });
+    log("running kimiflare", {
+      workerId,
+      cmdLength: kimiCmd.length,
+      mode: req.mode,
+      model: req.model ?? "@cf/moonshotai/kimi-k2.6",
+      inSandboxVersion: (versionRes.stdout ?? "").trim() || "(unknown)",
+      // The config we write (above) does not set `codeMode`, so the in-sandbox
+      // kimiflare uses its headless default (codeMode=true). Surfaced here so a
+      // wrangler tail makes the active execution strategy obvious.
+      codeModeNote: "in-sandbox default (config.json does not override codeMode)",
+    });
     let runRes;
     try {
       runRes = await sandbox.exec(kimiCmd);
@@ -276,8 +286,29 @@ export async function runWorker(
       throw new Error(`kimiflare execution failed inside Cloudflare Sandbox: ${msg}`);
     }
     const rawOutput = (runRes.stdout ?? "").trim();
+    const rawStderr = (runRes.stderr ?? "").trim();
     mark("agent-run");
-    log("kimiflare done", { workerId, exitCode: runRes.exitCode, success: runRes.success, stdoutLen: rawOutput.length });
+    // Full diagnostics for `wrangler tail`. Previously only `stdoutLen` was
+    // logged, so failures were invisible — we could not tell a code-mode hang
+    // from a slow-but-legit run, an API error, or an OOM. Log exit code, both
+    // stream lengths, and generous head/tail slices of each. Tail matters most:
+    // the real error (stack trace, budget message, kill notice) lands at the end.
+    log("kimiflare done", {
+      workerId,
+      exitCode: runRes.exitCode,
+      success: runRes.success,
+      stdoutLen: rawOutput.length,
+      stderrLen: rawStderr.length,
+      stdoutTail: rawOutput.slice(-4000),
+      stderrTail: rawStderr.slice(-4000),
+      stdoutHead: rawOutput.slice(0, 1000),
+    });
+    if (!runRes.success) {
+      // Surface the failure prominently and in full so the cause is unmissable
+      // in a tail. The coordinator only ever saw a 500-char slice before.
+      log("kimiflare FAILED — full stderr", { workerId, exitCode: runRes.exitCode, stderr: rawStderr });
+      log("kimiflare FAILED — full stdout", { workerId, stdout: rawOutput });
+    }
 
     // 6. Parse structured JSON the wrapper asked the model to emit
     const parsed = extractJsonBlock(rawOutput) ?? {};
@@ -347,7 +378,12 @@ export async function runWorker(
       prUrl,
       branchName,
       rawOutput,
-      error: runRes.success ? undefined : (runRes.stderr ?? "kimiflare exited non-zero").slice(0, 500),
+      // On failure, surface the END of stderr (the real error/stack/kill
+      // notice lands last) plus the exit code — not the first 500 chars, which
+      // were just startup/progress noise (e.g. a truncated `[tool execute_code(`).
+      error: runRes.success
+        ? undefined
+        : `kimiflare exited ${runRes.exitCode}. stderr tail:\n${(rawStderr || rawOutput || "(no output)").slice(-1500)}`,
       phases,
     };
   } catch (err) {

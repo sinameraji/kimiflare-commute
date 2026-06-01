@@ -149,17 +149,25 @@ export async function handleWorkerRequest(
   }
 }
 
-async function runWorker(
+export interface WorkerCallbacks {
+  onPhase?: (phase: string, message?: string) => void | Promise<void>;
+}
+
+export async function runWorker(
   env: Env,
   req: WorkerRequest,
   workerId: string,
+  callbacks?: WorkerCallbacks,
 ): Promise<WorkerResponse> {
   const startMs = Date.now();
   const phases: Array<{ name: string; ms: number }> = [];
-  const mark = (name: string) => {
+  const mark = async (name: string, msg?: string) => {
     const now = Date.now();
     phases.push({ name, ms: now - startMs });
     log(`phase: ${name}`, { workerId, elapsedMs: now - startMs });
+    if (callbacks?.onPhase) {
+      await callbacks.onPhase(name, msg);
+    }
   };
 
   try {

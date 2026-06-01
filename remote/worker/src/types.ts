@@ -15,6 +15,7 @@ export interface ArtifactsRegistry {
 export interface Env {
   // Durable Objects
   SESSION_DO: DurableObjectNamespace;
+  WORKER_DO: DurableObjectNamespace;
   SANDBOX: DurableObjectNamespace;
 
   // Bindings

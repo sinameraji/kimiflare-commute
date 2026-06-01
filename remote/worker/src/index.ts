@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import type { Env } from "./types.js";
 import { SessionDO } from "./session-do.js";
+import { WorkerDO } from "./worker-do.js";
 import { WarmPool } from "@cloudflare/sandbox/bridge";
 import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import {
@@ -363,8 +364,31 @@ app.get("/ws/:sessionId", async (c) => {
   }
 });
 
-// ── Multi-agent worker endpoint ─────────────────────────────────────
+// ── Multi-agent worker endpoint (async DO-based) ────────────────────
 app.post("/worker", async (c) => {
+  const body = await c.req.json() as Record<string, unknown>;
+  const workerId = `worker-${crypto.randomUUID().slice(0, 8)}`;
+  const id = c.env.WORKER_DO.idFromName(workerId);
+  const stub = c.env.WORKER_DO.get(id);
+  const res = await stub.fetch(new Request(`https://fake-host/start`, {
+    method: "POST",
+    body: JSON.stringify({ ...body, workerId }),
+  }));
+  return res;
+});
+
+app.get("/worker/:workerId/progress", async (c) => {
+  const workerId = c.req.param("workerId");
+  const id = c.env.WORKER_DO.idFromName(workerId);
+  const stub = c.env.WORKER_DO.get(id);
+  const res = await stub.fetch(new Request(`https://fake-host/progress`, {
+    method: "GET",
+  }));
+  return res;
+});
+
+// Legacy synchronous endpoint (kept for backward compat)
+app.post("/worker-sync", async (c) => {
   return handleWorkerRequest(c);
 });
 
@@ -375,4 +399,4 @@ app.get("/health", (c) => {
 });
 
 export default app;
-export { SessionDO, Sandbox, WarmPool };
+export { SessionDO, WorkerDO, Sandbox, WarmPool };

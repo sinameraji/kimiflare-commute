@@ -19,6 +19,10 @@ name = "SESSION_DO"
 class_name = "SessionDO"
 
 [[durable_objects.bindings]]
+name = "WORKER_DO"
+class_name = "WorkerDO"
+
+[[durable_objects.bindings]]
 name = "SANDBOX"
 class_name = "Sandbox"
 

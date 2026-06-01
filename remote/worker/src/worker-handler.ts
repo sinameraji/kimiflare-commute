@@ -170,7 +170,6 @@ export async function runWorker(
     }
   };
 
-  try {
   const owner = req.owner!;
   const repo = req.repo!;
   const githubToken = req.githubToken!;

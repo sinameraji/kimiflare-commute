@@ -276,6 +276,7 @@ export async function runWorker(
       // wrangler tail makes the active execution strategy obvious.
       codeModeNote: "in-sandbox default (config.json does not override codeMode)",
     });
+    mark("agent-run");
     let runRes;
     try {
       runRes = await sandbox.exec(kimiCmd);
@@ -287,7 +288,6 @@ export async function runWorker(
     }
     const rawOutput = (runRes.stdout ?? "").trim();
     const rawStderr = (runRes.stderr ?? "").trim();
-    mark("agent-run");
     // Full diagnostics for `wrangler tail`. Previously only `stdoutLen` was
     // logged, so failures were invisible — we could not tell a code-mode hang
     // from a slow-but-legit run, an API error, or an OOM. Log exit code, both

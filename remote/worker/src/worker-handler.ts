@@ -151,6 +151,8 @@ export async function handleWorkerRequest(
 
 export interface WorkerCallbacks {
   onPhase?: (phase: string, message?: string) => void | Promise<void>;
+  onLog?: (line: string) => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
 export async function runWorker(
@@ -194,11 +196,11 @@ export async function runWorker(
       artifactToken = undefined;
     }
   }
-  mark("artifact-import");
+  await mark("artifact-import");
 
   // 2. Get a Sandbox instance for this worker
   const sandbox = await getSandbox(env.SANDBOX as any, workerId);
-  mark("sandbox-acquire");
+  await mark("sandbox-acquire");
 
   try {
     // 3. Clone the repo into the sandbox
@@ -218,7 +220,7 @@ export async function runWorker(
     const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
     await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
     await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
-    mark("clone");
+    await mark("clone");
 
     // 3b. Ensure the in-sandbox kimiflare is current. End users always get
     // the latest published version; devs/CI can pin via the
@@ -256,7 +258,7 @@ export async function runWorker(
     });
     await sandbox.exec("mkdir -p /root/.config/kimiflare");
     await sandbox.exec(`cat > /root/.config/kimiflare/config.json << 'KIMICONFIG_EOF'\n${config}\nKIMICONFIG_EOF`);
-    mark("install-config");
+    await mark("install-config");
 
     // 5. Build the wrapped prompt and run kimiflare -p
     const wrapped = req.mode === "plan"
@@ -276,18 +278,93 @@ export async function runWorker(
       // wrangler tail makes the active execution strategy obvious.
       codeModeNote: "in-sandbox default (config.json does not override codeMode)",
     });
-    mark("agent-run");
-    let runRes;
-    try {
-      runRes = await sandbox.exec(kimiCmd);
-    } catch (execErr) {
-      const msg = execErr instanceof Error ? execErr.message : String(execErr);
-      log("sandbox.exec(kimiCmd) threw", { workerId, error: msg });
-      // Re-throw with context so the coordinator can show a useful message
-      throw new Error(`kimiflare execution failed inside Cloudflare Sandbox: ${msg}`);
+    await mark("agent-run");
+
+    // ── Stream kimiflare output in real-time ───────────────────────────
+    // sandbox.exec() is blocking — we get zero visibility for 5-10 min.
+    // Instead: run kimiflare in background, redirect to a file, and tail
+    // the file in a loop, reporting new lines via onLog callback.
+    const logFile = "/tmp/kimi-output.log";
+    const pidFile = "/tmp/kimi.pid";
+    const escapedCmd = kimiCmd.replace(/'/g, `'\\''`);
+    const startCmd = `nohup sh -c '${escapedCmd}' > ${logFile} 2>&1 & echo $! > ${pidFile}`;
+
+    log("starting kimiflare in background", { workerId, logFile });
+    const startRes = await sandbox.exec(startCmd);
+    if (!startRes.success) {
+      throw new Error(`Failed to start kimiflare: ${startRes.stderr || startRes.stdout}`);
     }
-    const rawOutput = (runRes.stdout ?? "").trim();
-    const rawStderr = (runRes.stderr ?? "").trim();
+
+    // Verify PID was written
+    const pidRes = await sandbox.exec(`cat ${pidFile}`);
+    const pid = (pidRes.stdout ?? "").trim();
+    if (!pid) {
+      throw new Error("Failed to get kimiflare PID");
+    }
+    log("kimiflare started", { workerId, pid });
+
+    // Tail the log file in real-time
+    let lastSize = 0;
+    const pollMs = 3000;
+    const maxWaitMs = 600_000; // 10 min safety cap
+    const agentStart = Date.now();
+    let runSuccess = false;
+    let runExitCode = -1;
+
+    while (Date.now() - agentStart < maxWaitMs) {
+      // Check cancellation
+      if (callbacks?.signal?.aborted) {
+        log("kimiflare cancelled by signal", { workerId });
+        await sandbox.exec(`kill -9 ${pid} 2>/dev/null || true`);
+        throw new Error("Cancelled by user");
+      }
+
+      // Check if process is still running
+      const checkRes = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`);
+      const isRunning = checkRes.stdout?.trim() === "running";
+
+      // Get current file size
+      const sizeRes = await sandbox.exec(`stat -c %s ${logFile} 2>/dev/null || echo 0`);
+      const currentSize = parseInt((sizeRes.stdout ?? "0").trim(), 10);
+
+      if (currentSize > lastSize) {
+        // Read new content
+        const newBytes = currentSize - lastSize;
+        const tailRes = await sandbox.exec(`tail -c ${newBytes} ${logFile}`);
+        const newContent = tailRes.stdout ?? "";
+        lastSize = currentSize;
+
+        // Report each new line
+        const lines = newContent.split("\n").filter((l) => l.trim());
+        for (const line of lines) {
+          if (callbacks?.onLog) {
+            await callbacks.onLog(line);
+          }
+        }
+      }
+
+      if (!isRunning) {
+        // Process finished — get exit code
+        const exitRes = await sandbox.exec(`wait ${pid} 2>/dev/null; echo $?`);
+        runExitCode = parseInt((exitRes.stdout ?? "-1").trim(), 10);
+        runSuccess = runExitCode === 0;
+        log("kimiflare finished", { workerId, exitCode: runExitCode, success: runSuccess, logSize: currentSize });
+        break;
+      }
+
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    // Read full output for parsing
+    const fullOutputRes = await sandbox.exec(`cat ${logFile}`);
+    const rawOutput = (fullOutputRes.stdout ?? "").trim();
+    const rawStderr = ""; // stderr is merged into stdout via 2>&1
+
+    if (Date.now() - agentStart >= maxWaitMs) {
+      log("kimiflare timed out", { workerId });
+      await sandbox.exec(`kill -9 ${pid} 2>/dev/null || true`);
+      throw new Error("KimiFlare agent timed out after 10 minutes");
+    }
     // Full diagnostics for `wrangler tail`. Previously only `stdoutLen` was
     // logged, so failures were invisible — we could not tell a code-mode hang
     // from a slow-but-legit run, an API error, or an OOM. Log exit code, both
@@ -295,18 +372,18 @@ export async function runWorker(
     // the real error (stack trace, budget message, kill notice) lands at the end.
     log("kimiflare done", {
       workerId,
-      exitCode: runRes.exitCode,
-      success: runRes.success,
+      exitCode: runExitCode,
+      success: runSuccess,
       stdoutLen: rawOutput.length,
       stderrLen: rawStderr.length,
       stdoutTail: rawOutput.slice(-4000),
       stderrTail: rawStderr.slice(-4000),
       stdoutHead: rawOutput.slice(0, 1000),
     });
-    if (!runRes.success) {
+    if (!runSuccess) {
       // Surface the failure prominently and in full so the cause is unmissable
       // in a tail. The coordinator only ever saw a 500-char slice before.
-      log("kimiflare FAILED — full stderr", { workerId, exitCode: runRes.exitCode, stderr: rawStderr });
+      log("kimiflare FAILED — full stderr", { workerId, exitCode: runExitCode, stderr: rawStderr });
       log("kimiflare FAILED — full stdout", { workerId, stdout: rawOutput });
     }
 
@@ -363,10 +440,10 @@ export async function runWorker(
     const tokensUsed = Math.ceil(rawOutput.length / 4);
     const costUsd = (tokensUsed / 1_000_000) * 1.0;
 
-    mark("total");
+    await mark("total");
     return {
       workerId,
-      status: runRes.success ? "completed" : "failed",
+      status: runSuccess ? "completed" : "failed",
       task: req.task,
       findings,
       recommendations,
@@ -387,7 +464,7 @@ export async function runWorker(
       phases,
     };
   } catch (err) {
-    mark("total");
+    await mark("total");
     const message = err instanceof Error ? err.message : String(err);
     return emptyResponse(workerId, req.task, message, phases);
   } finally {

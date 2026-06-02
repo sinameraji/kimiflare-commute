@@ -41,6 +41,7 @@ const STEP_LABELS: Record<string, string> = {
 export class WorkerDO implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
+  private abortController?: AbortController;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -59,7 +60,28 @@ export class WorkerDO implements DurableObject {
       return this.handleProgress();
     }
 
+    if (path.endsWith("/cancel") && request.method === "POST") {
+      return this.handleCancel();
+    }
+
     return new Response("Not found", { status: 404 });
+  }
+
+  private async handleCancel(): Promise<Response> {
+    log("handleCancel", { hasController: !!this.abortController });
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    // Update progress to show cancelled status
+    const progress = await this.state.storage.get<WorkerProgress>("progress");
+    if (progress) {
+      progress.status = "failed";
+      progress.error = "Cancelled by user";
+      progress.logs.push(`[${new Date().toISOString()}] Cancelled by user`);
+      progress.updatedAt = Date.now();
+      await this.state.storage.put("progress", progress);
+    }
+    return Response.json({ success: true, cancelled: !!this.abortController });
   }
 
   private async handleStart(request: Request): Promise<Response> {
@@ -129,11 +151,14 @@ export class WorkerDO implements DurableObject {
     };
 
     try {
+      // Create abort controller for cancellation support
+      this.abortController = new AbortController();
+
       await setStep("artifact-import", "running");
       await appendLog("Importing repository into Artifacts (or falling back to direct clone)");
 
       // Run the actual worker — runWorker will handle all phases
-      // We wrap it to capture phase updates
+      // We wrap it to capture phase updates and real-time logs
       const result = await runWorker(this.env, payload as any, workerId, {
         onPhase: async (phase: string, msg?: string) => {
           if (STEPS.includes(phase)) {
@@ -141,8 +166,13 @@ export class WorkerDO implements DurableObject {
           }
           if (msg) await appendLog(msg);
         },
+        onLog: async (line: string) => {
+          await appendLog(line);
+        },
+        signal: this.abortController.signal,
       });
 
+      this.abortController = undefined;
       await setStep("finalize", result.status === "completed" ? "completed" : "failed");
       await appendLog(`Worker finished with status: ${result.status}`);
 

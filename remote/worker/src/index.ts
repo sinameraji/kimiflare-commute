@@ -387,6 +387,16 @@ app.get("/worker/:workerId/progress", async (c) => {
   return res;
 });
 
+app.post("/worker/:workerId/cancel", async (c) => {
+  const workerId = c.req.param("workerId");
+  const id = c.env.WORKER_DO.idFromName(workerId);
+  const stub = c.env.WORKER_DO.get(id);
+  const res = await stub.fetch(new Request(`https://fake-host/cancel`, {
+    method: "POST",
+  }));
+  return res;
+});
+
 // Legacy synchronous endpoint (kept for backward compat)
 app.post("/worker-sync", async (c) => {
   return handleWorkerRequest(c);

@@ -21,6 +21,7 @@ export interface Env {
   // Bindings
   ARTIFACTS?: ArtifactsRegistry;
   OAUTH_KV: KVNamespace;
+  BACKUP_BUCKET?: R2Bucket;
 
   // Secrets
   GITHUB_OAUTH_CLIENT_ID: string;

@@ -20,6 +20,13 @@
 import type { Env } from "./types.js";
 import { getSandbox } from "@cloudflare/sandbox";
 import { createPullRequest } from "./github.js";
+import {
+  cleanupOldBackups,
+  deleteRepoBackup,
+  ensureBackupTable,
+  getRepoBackup,
+  setRepoBackup,
+} from "./repo-cache.js";
 
 export interface WorkerRequest {
   mode: "plan" | "execute";
@@ -205,6 +212,7 @@ export async function runWorker(
   req: WorkerRequest,
   workerId: string,
   callbacks?: WorkerCallbacks,
+  sql?: SqlStorage,
 ): Promise<WorkerResponse> {
   const startMs = Date.now();
   const phases: Array<{ name: string; ms: number }> = [];
@@ -271,25 +279,66 @@ export async function runWorker(
   await mark("sandbox-acquire");
 
   try {
-    // 3. Clone the repo into the sandbox
-    let cloneUrl: string;
-    if (artifact && artifactToken) {
-      cloneUrl = artifact.remote.replace("https://", `https://token:${encodeURIComponent(artifactToken)}@`);
-    } else {
-      cloneUrl = githubUrl.replace("https://", `https://${encodeURIComponent(githubToken)}@`);
+    // ── Try restore from backup ─────────────────────────────────────────
+    let usedBackup = false;
+    let backupId: string | null = null;
+
+    if (owner && repo && sql) {
+      ensureBackupTable(sql);
+      backupId = await getRepoBackup(sql, owner, repo);
+      if (backupId) {
+        await mark("restore-backup", `Restoring from backup ${backupId.slice(0, 8)}…`);
+        try {
+          const restoreResult = await (sandbox as any).restoreBackup({
+            id: backupId,
+            dir: "/workspace/repo",
+          });
+          if (restoreResult?.success) {
+            usedBackup = true;
+            // Fast-forward to latest
+            const pullRes = await sandbox.exec("cd /workspace/repo && git pull --ff-only");
+            if (!pullRes.success) {
+              log("backup restore ok but git pull failed", { workerId, stderr: pullRes.stderr });
+              // Non-fatal: repo is just slightly behind
+            }
+            log("repo restored from backup", { workerId, backupId: backupId.slice(0, 8) });
+            // Ensure remote uses the GitHub token so push works in execute mode
+            const encodedGhToken = encodeURIComponent(githubToken);
+            const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
+            await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
+            await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
+          } else {
+            throw new Error("restoreBackup returned non-success");
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log("backup restore failed — falling back to full clone", { workerId, backupId: backupId.slice(0, 8), error: msg });
+          await deleteRepoBackup(sql, owner, repo);
+          backupId = null;
+        }
+      }
     }
-    const depthFlag = req.shallowClone !== false ? "--depth 1" : "--depth 50";
-    const cloneRes = await sandbox.exec(`rm -rf /workspace/repo && git clone ${depthFlag} ${cloneUrl} /workspace/repo`);
-    if (!cloneRes.success) {
-      throw new Error(`git clone failed: ${(cloneRes.stderr || cloneRes.stdout || "").slice(0, 300)}`);
+    // ── Clone (only if no backup) ───────────────────────────────────────
+    if (!usedBackup) {
+      let cloneUrl: string;
+      if (artifact && artifactToken) {
+        cloneUrl = artifact.remote.replace("https://", `https://token:${encodeURIComponent(artifactToken)}@`);
+      } else {
+        cloneUrl = githubUrl.replace("https://", `https://${encodeURIComponent(githubToken)}@`);
+      }
+      const depthFlag = req.shallowClone !== false ? "--depth 1" : "--depth 50";
+      const cloneRes = await sandbox.exec(`rm -rf /workspace/repo && git clone ${depthFlag} ${cloneUrl} /workspace/repo`);
+      if (!cloneRes.success) {
+        throw new Error(`git clone failed: ${(cloneRes.stderr || cloneRes.stdout || "").slice(0, 300)}`);
+      }
+      log("repo cloned", { workerId });
+      // Ensure remote uses the GitHub token so push works in execute mode
+      const encodedGhToken = encodeURIComponent(githubToken);
+      const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
+      await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
+      await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
+      await mark("clone");
     }
-    log("repo cloned", { workerId });
-    // Ensure remote uses the GitHub token so push works in execute mode
-    const encodedGhToken = encodeURIComponent(githubToken);
-    const githubRemote = githubUrl.replace("https://", `https://${encodedGhToken}@`);
-    await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
-    await sandbox.exec(`cd /workspace/repo && git config user.email "kimiflare-worker@proton.me" && git config user.name "kimiflare-worker"`);
-    await mark("clone");
 
     // 3b. Ensure the in-sandbox kimiflare is current. End users always get
     // the latest published version; devs/CI can pin via the
@@ -328,6 +377,24 @@ export async function runWorker(
     await sandbox.exec("mkdir -p /root/.config/kimiflare");
     await sandbox.exec(`cat > /root/.config/kimiflare/config.json << 'KIMICONFIG_EOF'\n${config}\nKIMICONFIG_EOF`);
     await mark("install-config");
+
+    // ── Create backup for next time ─────────────────────────────────────
+    if (!usedBackup && owner && repo && sql && env.BACKUP_BUCKET) {
+      try {
+        const backup = await (sandbox as any).createBackup({
+          dir: "/workspace/repo",
+          name: `${owner}/${repo}`,
+          ttl: 24 * 60 * 60,
+        });
+        if (backup?.id) {
+          await setRepoBackup(sql, owner, repo, backup.id);
+          log("backup created", { workerId, backupId: backup.id.slice(0, 8) });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log("backup creation failed (non-fatal)", { workerId, error: msg });
+      }
+    }
 
     // 5. Build the wrapped prompt and run kimiflare -p
     const wrapped = req.mode === "plan"

@@ -1,5 +1,6 @@
 import type { Env } from "./types.js";
 import { runWorker } from "./worker-handler.js";
+import { cleanupOldBackups } from "./repo-cache.js";
 
 function log(label: string, data?: unknown) {
   console.log(`[WorkerDO] ${label}:`, JSON.stringify(data, null, 2));
@@ -23,6 +24,7 @@ export interface WorkerProgress {
 const STEPS = [
   "artifact-import",
   "sandbox-acquire",
+  "restore-backup",
   "clone",
   "install-config",
   "agent-run",
@@ -32,6 +34,7 @@ const STEPS = [
 const STEP_LABELS: Record<string, string> = {
   "artifact-import": "Importing repository into Artifacts",
   "sandbox-acquire": "Starting Cloudflare Sandbox (cold start — this can take 30-60s)",
+  "restore-backup": "Restoring repository from cache",
   clone: "Cloning repository into sandbox",
   "install-config": "Installing KimiFlare and configuring credentials",
   "agent-run": "Running KimiFlare agent loop",
@@ -157,6 +160,13 @@ export class WorkerDO implements DurableObject {
       await setStep("artifact-import", "running");
       await appendLog("Importing repository into Artifacts (or falling back to direct clone)");
 
+      // Prune stale backup rows on every worker start
+      try {
+        cleanupOldBackups(this.state.storage.sql);
+      } catch {
+        // Non-fatal — old rows will be re-checked individually
+      }
+
       // Run the actual worker — runWorker will handle all phases
       // We wrap it to capture phase updates and real-time logs
       const result = await runWorker(this.env, payload as any, workerId, {
@@ -170,7 +180,7 @@ export class WorkerDO implements DurableObject {
           await appendLog(line);
         },
         signal: this.abortController.signal,
-      });
+      }, this.state.storage.sql);
 
       this.abortController = undefined;
       const finalStatus: WorkerProgress["status"] =

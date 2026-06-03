@@ -47,11 +47,19 @@ export interface WorkerRequest {
    *  the Commute operator's. Falls back to the operator's env creds. */
   userAccountId?: string;
   userApiToken?: string;
+  /** Batch identifier sent by the coordinator so the Commute worker can
+   *  share a single imported artifact across workers in the same batch. */
+  batchId?: string;
+  /** When true, clone with `--depth 1` to reduce cold-start time. */
+  shallowClone?: boolean;
+  /** When true (and batchId is set), attempt to fork a shared batch artifact
+   *  instead of re-importing the repo for every worker. */
+  repoCache?: boolean;
 }
 
 export interface WorkerResponse {
   workerId: string;
-  status: "completed" | "failed" | "cancelled";
+  status: "completed" | "failed" | "cancelled" | "budget_exhausted";
   task: string;
   findings: Array<{
     topic: string;
@@ -72,16 +80,26 @@ export interface WorkerResponse {
   error?: string;
   /** Phase timing breakdown for debugging cold-start issues. */
   phases?: Array<{ name: string; ms: number }>;
+  /** True when the worker was killed because it exceeded its budget ceiling. */
+  budgetExceeded?: boolean;
+  /** True when the result contains partial findings produced before budget exhaustion. */
+  partialResult?: boolean;
 }
 
 function log(label: string, data?: unknown) {
   console.log(`[WorkerEndpoint] ${label}:`, JSON.stringify(data, null, 2));
 }
 
-function emptyResponse(workerId: string, task: string, error: string, phases?: Array<{ name: string; ms: number }>): WorkerResponse {
+function emptyResponse(
+  workerId: string,
+  task: string,
+  error: string,
+  phases?: Array<{ name: string; ms: number }>,
+  status: WorkerResponse["status"] = "failed",
+): WorkerResponse {
   return {
     workerId,
-    status: "failed",
+    status,
     task,
     findings: [],
     recommendations: [],
@@ -92,7 +110,34 @@ function emptyResponse(workerId: string, task: string, error: string, phases?: A
     reasoning: "",
     error,
     phases,
+    budgetExceeded: status === "budget_exhausted",
+    partialResult: status === "budget_exhausted",
   };
+}
+
+/** Resolve the effective budget for a worker, applying the server-side hard ceiling.
+ *
+ *  - Client-sent maxCostUsd is honored up to the hard ceiling.
+ *  - If no budget is sent, defaults to 1.0.
+ *  - The hard ceiling comes from WORKER_BUDGET_MAX_USD env (default 5.0).
+ */
+function resolveBudgetUsd(req: WorkerRequest, env: Env): number {
+  const DEFAULT_BUDGET = 1.0;
+  const HARD_CEILING = parseFloat(env.WORKER_BUDGET_MAX_USD ?? "5.0");
+  const client = req.budget?.maxCostUsd ?? DEFAULT_BUDGET;
+  return Math.min(client, HARD_CEILING);
+}
+
+/** Rough cost estimate from log file bytes.
+ *
+ *  Uses a conservative blended rate ($3.00 / M tokens) and assumes
+ *  ~3 chars per token. This is intentionally pessimistic so we kill
+ *  the sandbox *before* the real cost exceeds the budget.
+ */
+function estimateCostUsd(logBytes: number): number {
+  const tokens = logBytes / 3;
+  const blendedRatePerMtok = 3.0; // conservative blended input+output rate
+  return (tokens / 1_000_000) * blendedRatePerMtok;
 }
 
 export async function handleWorkerRequest(
@@ -178,17 +223,40 @@ export async function runWorker(
   const baseBranch = req.baseBranch ?? "main";
   const githubUrl = `https://github.com/${owner}/${repo}.git`;
 
+  // Budget enforcement setup
+  const budgetUsd = resolveBudgetUsd(req, env);
+  log("budget resolved", { workerId, budgetUsd, clientBudget: req.budget?.maxCostUsd });
+
   // 1. Import repo into Artifacts (with fallback to direct GitHub clone)
+  //    When repoCache + batchId are set, try to fork a shared batch artifact
+  //    so multiple workers in the same batch don't each re-import the repo.
   let artifact: { name: string; remote: string } | undefined;
   let artifactToken: string | undefined;
+  const batchArtifactName = req.batchId && req.repoCache ? `batch-${req.batchId}` : undefined;
   if (env.ARTIFACTS) {
     try {
-      artifact = await env.ARTIFACTS.import({
-        source: { url: githubUrl, branch: baseBranch },
-        target: { name: workerId },
-      });
-      log("artifact imported", { workerId, name: artifact.name });
-      const tokenRes = await env.ARTIFACTS.get(workerId).createToken("read-write", 3600);
+      if (batchArtifactName) {
+        // Try to fork an existing batch artifact first
+        try {
+          const forked = await env.ARTIFACTS.get(batchArtifactName).fork(workerId, { readOnly: false });
+          artifact = forked;
+          log("artifact forked from batch cache", { workerId, batchArtifactName, name: artifact.name });
+        } catch {
+          // Batch artifact doesn't exist yet — import it as the batch artifact
+          artifact = await env.ARTIFACTS.import({
+            source: { url: githubUrl, branch: baseBranch },
+            target: { name: batchArtifactName },
+          });
+          log("artifact imported as batch cache", { workerId, batchArtifactName, name: artifact.name });
+        }
+      } else {
+        artifact = await env.ARTIFACTS.import({
+          source: { url: githubUrl, branch: baseBranch },
+          target: { name: workerId },
+        });
+        log("artifact imported", { workerId, name: artifact.name });
+      }
+      const tokenRes = await env.ARTIFACTS.get(artifact.name).createToken("read-write", 3600);
       artifactToken = tokenRes.plaintext;
     } catch (err) {
       log("artifact import failed — falling back to direct clone", { error: err instanceof Error ? err.message : String(err) });
@@ -210,7 +278,8 @@ export async function runWorker(
     } else {
       cloneUrl = githubUrl.replace("https://", `https://${encodeURIComponent(githubToken)}@`);
     }
-    const cloneRes = await sandbox.exec(`rm -rf /workspace/repo && git clone --depth 50 ${cloneUrl} /workspace/repo`);
+    const depthFlag = req.shallowClone !== false ? "--depth 1" : "--depth 50";
+    const cloneRes = await sandbox.exec(`rm -rf /workspace/repo && git clone ${depthFlag} ${cloneUrl} /workspace/repo`);
     if (!cloneRes.success) {
       throw new Error(`git clone failed: ${(cloneRes.stderr || cloneRes.stdout || "").slice(0, 300)}`);
     }
@@ -287,7 +356,8 @@ export async function runWorker(
     const logFile = "/tmp/kimi-output.log";
     const pidFile = "/tmp/kimi.pid";
     const escapedCmd = kimiCmd.replace(/'/g, `'\\''`);
-    const startCmd = `nohup sh -c '${escapedCmd}' > ${logFile} 2>&1 & echo $! > ${pidFile}`;
+    const shallowEnv = req.shallowClone !== false ? "SHALLOW_CLONE=1 " : "";
+    const startCmd = `nohup sh -c '${shallowEnv}${escapedCmd}' > ${logFile} 2>&1 & echo $! > ${pidFile}`;
 
     log("starting kimiflare in background", { workerId, logFile });
     const startRes = await sandbox.exec(startCmd);
@@ -310,6 +380,8 @@ export async function runWorker(
     const agentStart = Date.now();
     let runSuccess = false;
     let runExitCode = -1;
+
+    let budgetKilled = false;
 
     while (Date.now() - agentStart < maxWaitMs) {
       // Check cancellation
@@ -340,6 +412,24 @@ export async function runWorker(
           if (callbacks?.onLog) {
             await callbacks.onLog(line);
           }
+        }
+
+        // ── Budget enforcement ──
+        // Estimate cost from log size and kill the sandbox if we've blown
+        // the budget. This is a conservative heuristic (intentionally
+        // over-estimates) so we act *before* the real Cloudflare bill
+        // exceeds the ceiling.
+        const estimatedCost = estimateCostUsd(currentSize);
+        if (estimatedCost >= budgetUsd) {
+          log("budget exceeded — killing sandbox", {
+            workerId,
+            estimatedCostUsd: estimatedCost.toFixed(4),
+            budgetUsd,
+            logBytes: currentSize,
+          });
+          await sandbox.exec(`kill -9 ${pid} 2>/dev/null || true`);
+          budgetKilled = true;
+          break;
         }
       }
 
@@ -441,6 +531,30 @@ export async function runWorker(
     const costUsd = (tokensUsed / 1_000_000) * 1.0;
 
     await mark("total");
+
+    if (budgetKilled) {
+      return {
+        workerId,
+        status: "budget_exhausted",
+        task: req.task,
+        findings,
+        recommendations,
+        filesRead,
+        webSources: [],
+        costUsd,
+        tokensUsed,
+        reasoning: (parsed.reasoning as string) ?? rawOutput.slice(0, 2000),
+        prUrl,
+        branchName,
+        rawOutput,
+        error: `Worker exceeded its ${budgetUsd.toFixed(2)} budget ceiling and was terminated. ` +
+          `Results below are partial — whatever the agent had produced before the kill signal.`,
+        phases,
+        budgetExceeded: true,
+        partialResult: true,
+      };
+    }
+
     return {
       workerId,
       status: runSuccess ? "completed" : "failed",
@@ -458,9 +572,9 @@ export async function runWorker(
       // On failure, surface the END of stderr (the real error/stack/kill
       // notice lands last) plus the exit code — not the first 500 chars, which
       // were just startup/progress noise (e.g. a truncated `[tool execute_code(`).
-      error: runRes.success
+      error: runSuccess
         ? undefined
-        : `kimiflare exited ${runRes.exitCode}. stderr tail:\n${(rawStderr || rawOutput || "(no output)").slice(-1500)}`,
+        : `kimiflare exited ${runExitCode}. stderr tail:\n${(rawStderr || rawOutput || "(no output)").slice(-1500)}`,
       phases,
     };
   } catch (err) {
@@ -490,8 +604,16 @@ export async function runWorker(
     }
     if (env.ARTIFACTS && artifact) {
       try {
-        await env.ARTIFACTS.delete(workerId);
-        log("artifact deleted", { workerId });
+        // When repoCache is enabled with a batchId, the artifact is shared
+        // across workers in the same batch. Deleting it here would break
+        // subsequent workers. The batch artifact is ephemeral and will be
+        // cleaned up by the platform's artifact lifecycle.
+        if (batchArtifactName && req.repoCache) {
+          log("skipping artifact delete (batch cache)", { workerId, batchArtifactName });
+        } else {
+          await env.ARTIFACTS.delete(workerId);
+          log("artifact deleted", { workerId });
+        }
       } catch (err) {
         log("cleanup warning (artifact)", err instanceof Error ? err.message : String(err));
       }

@@ -7,7 +7,7 @@ function log(label: string, data?: unknown) {
 
 export interface WorkerProgress {
   workerId: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "budget_exhausted";
   step: string;
   stepIndex: number;
   totalSteps: number;
@@ -141,7 +141,7 @@ export class WorkerDO implements DurableObject {
       progress.status = status;
       progress.message = message ?? STEP_LABELS[step] ?? step;
       if (error) progress.error = error;
-      if (status === "completed" || status === "failed") {
+      if (status === "completed" || status === "failed" || status === "budget_exhausted") {
         progress.completedSteps = [...STEPS.slice(0, stepIndex + 1)];
       } else {
         progress.completedSteps = [...STEPS.slice(0, stepIndex)];
@@ -173,14 +173,20 @@ export class WorkerDO implements DurableObject {
       });
 
       this.abortController = undefined;
-      await setStep("finalize", result.status === "completed" ? "completed" : "failed");
+      const finalStatus: WorkerProgress["status"] =
+        result.status === "completed"
+          ? "completed"
+          : result.status === "budget_exhausted"
+            ? "budget_exhausted"
+            : "failed";
+      await setStep("finalize", finalStatus as WorkerProgress["status"]);
       await appendLog(`Worker finished with status: ${result.status}`);
 
       // Store the final result
       const progress = await this.state.storage.get<WorkerProgress>("progress");
       if (progress) {
         progress.result = result as unknown as Record<string, unknown>;
-        progress.status = result.status;
+        progress.status = finalStatus;
         await this.state.storage.put("progress", progress);
       }
     } catch (err) {

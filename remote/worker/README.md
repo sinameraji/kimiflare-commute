@@ -82,7 +82,18 @@ wrangler kv:namespace create OAUTH_KV
 
 Copy the `id` from the output and paste it into `wrangler.toml` under `[[kv_namespaces]]`.
 
-### 5. Set secrets
+### 5. Create the R2 backup bucket (optional)
+
+This enables 1–3s repo restore for repeat visits instead of re-cloning:
+
+```bash
+wrangler r2 bucket create kimiflare-commute-backups
+```
+
+The bucket name must match `wrangler.toml` (`bucket_name = "kimiflare-commute-backups"`).
+If you skip this step, the worker falls back to full clone — no breaking change.
+
+### 6. Set secrets
 
 Run these one by one. Wrangler will prompt you for the value each time:
 
@@ -114,7 +125,7 @@ wrangler secret put ADMIN_GITHUB_ID
 # a single GitHub user ID with admin privileges
 ```
 
-### 6. Deploy
+### 7. Deploy
 
 ```bash
 wrangler deploy
@@ -126,11 +137,11 @@ Wrangler will print your worker URL, e.g.:
 https://kimiflare-commute.your-subdomain.workers.dev
 ```
 
-### 7. Update GitHub OAuth callback URL
+### 8. Update GitHub OAuth callback URL
 
 If you used a placeholder in step 2, go back to your GitHub OAuth app settings and update the **Authorization callback URL** to match your actual worker URL + `/auth/github/callback`.
 
-### 8. Use it
+### 9. Use it
 
 Open your worker URL in a browser, log in with GitHub, pick a repository, and wait for the setup steps to complete. You'll get a terminal into a Cloudflare Sandbox with KimiFlare ready to go.
 

@@ -53,6 +53,13 @@ namespace = "default"
 binding = "OAUTH_KV"
 id = "4c23fe928c814a01b0384b58330eff3f"
 
+# ── R2 Bucket (sandbox backup cache) ──────────────────────────────────
+# Create: wrangler r2 bucket create kimiflare-commute-backups
+# Optional — when absent, workers fall back to full clone (no breaking change).
+[[r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "kimiflare-commute-backups"
+
 # ── Secrets (set via `wrangler secret put <NAME>`) ───────────────────
 #   GITHUB_OAUTH_CLIENT_ID      - From your GitHub OAuth app
 #   GITHUB_OAUTH_CLIENT_SECRET  - From your GitHub OAuth app

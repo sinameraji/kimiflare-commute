@@ -1,5 +1,12 @@
 import type { SessionState, SetupProgress, Env } from "./types.js";
 import { getSandbox } from "@cloudflare/sandbox";
+import {
+  cleanupOldBackups,
+  deleteRepoBackup,
+  ensureBackupTable,
+  getRepoBackup,
+  setRepoBackup,
+} from "./repo-cache.js";
 
 function log(label: string, data?: unknown) {
   console.log(`[SessionDO] ${label}:`, JSON.stringify(data, null, 2));
@@ -67,10 +74,19 @@ export class SessionDO implements DurableObject {
 
     log("handleSetup — start", { owner, name, userId, sessionId, force: !!force });
 
+    // Prune stale backup rows on every setup
+    try {
+      ensureBackupTable(this.state.storage.sql);
+      cleanupOldBackups(this.state.storage.sql);
+    } catch {
+      // Non-fatal
+    }
+
     const STEPS = [
       "import",
       "token",
       "sandbox",
+      "restore-backup",
       "clone",
       "verify",
       "install",
@@ -81,6 +97,7 @@ export class SessionDO implements DurableObject {
       import: "Importing repository into Artifacts",
       token: "Creating write token",
       sandbox: "Starting Cloudflare Sandbox",
+      "restore-backup": "Restoring repository from cache",
       clone: "Cloning repository into sandbox",
       verify: "Verifying repository",
       install: "Installing KimiFlare",
@@ -248,87 +265,147 @@ export class SessionDO implements DurableObject {
         throw err;
       }
 
+      // ── Step 3b: Try restore from backup ────────────────────────────
+      let usedBackup = false;
+      if (this.env.BACKUP_BUCKET) {
+        const backupId = await getRepoBackup(this.state.storage.sql, owner, name);
+        if (backupId) {
+          await setProgress("restore-backup", "running", STEP_LABELS["restore-backup"]);
+          appendLog(`Restoring repository from backup ${backupId.slice(0, 8)}…`);
+          try {
+            const restoreResult = await (sandbox as any).restoreBackup({ id: backupId, dir: "/workspace/repo" });
+            if (restoreResult?.success) {
+              usedBackup = true;
+              const pullRes = await sandbox.exec("cd /workspace/repo && git pull --ff-only");
+              if (!pullRes.success) {
+                appendLog("Warning: git pull failed after restore");
+              } else {
+                appendLog("Repository fast-forwarded to latest");
+              }
+              // Ensure git remote points to GitHub so pull/push always use live source
+              const encodedToken = encodeURIComponent(githubToken);
+              const githubRemote = githubUrl.replace("https://", `https://${encodedToken}@`);
+              const originRes = await sandbox.exec(`cd /workspace/repo && git remote set-url origin ${githubRemote}`);
+              if (originRes.success) {
+                appendLog("Git remote set to GitHub origin");
+              } else {
+                appendLog("Warning: could not update git remote");
+              }
+              await setProgress("restore-backup", "complete");
+              log("backup restored", { sessionId, backupId: backupId.slice(0, 8) });
+            } else {
+              throw new Error("restoreBackup returned non-success");
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log("backup restore failed", { sessionId, backupId: backupId.slice(0, 8), error: msg });
+            appendLog(`Backup restore failed: ${msg}`);
+            await deleteRepoBackup(this.state.storage.sql, owner, name);
+            await setProgress("restore-backup", "complete", "Restore failed — will clone fresh");
+          }
+        }
+      }
+
       // ── Step 4: Clone the repo into the sandbox ─────────────────────
-      await setProgress("clone", "running", STEP_LABELS.clone);
-      appendLog("Cloning repository into /workspace/repo...");
-      let cloneUrl: string;
-      if (artifact && artifactToken) {
-        const encodedToken = encodeURIComponent(artifactToken);
-        cloneUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
-        appendLog("Using Artifacts remote for clone");
-        log("Step 4 — git clone (Artifacts)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
-      } else {
-        // Fallback: clone directly from GitHub using the user's token
-        const encodedToken = encodeURIComponent(githubToken);
-        cloneUrl = githubUrl.replace("https://", `https://${encodedToken}@`);
-        appendLog("Using GitHub direct clone (fallback)");
-        log("Step 4 — git clone (GitHub fallback)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
-      }
-      let cloneRes: Awaited<ReturnType<typeof sandbox.exec>>;
-      try {
-        cloneRes = await sandbox.exec(`git clone ${cloneUrl} /workspace/repo`);
-        appendLog(`Clone finished (exit code: ${cloneRes.exitCode})`);
-        log("Step 4 — result", { success: cloneRes.success, exitCode: cloneRes.exitCode, stderr: cloneRes.stderr });
-        if (!cloneRes.success) {
-          throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);
-        }
-        // Ensure git remote points to GitHub so pull/push always use live source
-        const encodedToken = encodeURIComponent(githubToken);
-        const githubRemote = githubUrl.replace("https://", `https://${encodedToken}@`);
-        const originRes = await sandbox.exec(
-          `cd /workspace/repo && git remote set-url origin ${githubRemote}`
-        );
-        if (originRes.success) {
-          appendLog("Git remote set to GitHub origin");
+      let logRes: Awaited<ReturnType<typeof sandbox.exec>> | undefined;
+      if (!usedBackup) {
+        await setProgress("clone", "running", STEP_LABELS.clone);
+        appendLog("Cloning repository into /workspace/repo...");
+        let cloneUrl: string;
+        if (artifact && artifactToken) {
+          const encodedToken = encodeURIComponent(artifactToken);
+          cloneUrl = artifact.remote.replace("https://", `https://token:${encodedToken}@`);
+          appendLog("Using Artifacts remote for clone");
+          log("Step 4 — git clone (Artifacts)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
         } else {
-          appendLog("Warning: could not update git remote");
+          // Fallback: clone directly from GitHub using the user's token
+          const encodedToken = encodeURIComponent(githubToken);
+          cloneUrl = githubUrl.replace("https://", `https://${encodedToken}@`);
+          appendLog("Using GitHub direct clone (fallback)");
+          log("Step 4 — git clone (GitHub fallback)", { url: cloneUrl.replace(encodedToken, "***REDACTED***") });
         }
-        await setProgress("clone", "complete");
-      } catch (err) {
-        log("Step 4 — FAIL", err instanceof Error ? err.message : String(err));
-        await setProgress("clone", "error", STEP_LABELS.clone, err instanceof Error ? err.message : String(err));
-        throw err;
+        try {
+          const cloneRes = await sandbox.exec(`git clone ${cloneUrl} /workspace/repo`);
+          appendLog(`Clone finished (exit code: ${cloneRes.exitCode})`);
+          log("Step 4 — result", { success: cloneRes.success, exitCode: cloneRes.exitCode, stderr: cloneRes.stderr });
+          if (!cloneRes.success) {
+            throw new Error(`git clone failed: ${cloneRes.stderr || cloneRes.stdout}`);
+          }
+          // Ensure git remote points to GitHub so pull/push always use live source
+          const encodedToken = encodeURIComponent(githubToken);
+          const githubRemote = githubUrl.replace("https://", `https://${encodedToken}@`);
+          const originRes = await sandbox.exec(
+            `cd /workspace/repo && git remote set-url origin ${githubRemote}`
+          );
+          if (originRes.success) {
+            appendLog("Git remote set to GitHub origin");
+          } else {
+            appendLog("Warning: could not update git remote");
+          }
+          await setProgress("clone", "complete");
+        } catch (err) {
+          log("Step 4 — FAIL", err instanceof Error ? err.message : String(err));
+          await setProgress("clone", "error", STEP_LABELS.clone, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
+
+        // ── Step 5: Run git log to prove it worked ──────────────────────
+        await setProgress("verify", "running", STEP_LABELS.verify);
+        appendLog("Verifying repository contents...");
+        log("Step 5 — git log");
+        try {
+          logRes = await sandbox.exec("cd /workspace/repo && git log --oneline -5");
+          const lines = logRes.stdout?.trim().split("\n").length ?? 0;
+          appendLog(`Verified ${lines} commits`);
+          log("Step 5 — result", { success: logRes.success, exitCode: logRes.exitCode, stdout: logRes.stdout });
+          if (!logRes.success) {
+            throw new Error(`git log failed: ${logRes.stderr || logRes.stdout}`);
+          }
+          await setProgress("verify", "complete");
+        } catch (err) {
+          log("Step 5 — FAIL", err instanceof Error ? err.message : String(err));
+          await setProgress("verify", "error", STEP_LABELS.verify, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
+
+        // ── Step 6: Install KimiFlare globally ──────────────────────────
+        await setProgress("install", "running", STEP_LABELS.install);
+        appendLog("Running npm install -g kimiflare...");
+        log("Step 6 — npm install -g kimiflare");
+        try {
+          const installRes = await sandbox.exec("npm install -g kimiflare");
+          appendLog(installRes.success ? "KimiFlare installed successfully" : `Install warning (exit ${installRes.exitCode})`);
+          log("Step 6 — result", { success: installRes.success, exitCode: installRes.exitCode });
+          if (!installRes.success) {
+            log("Step 6 — WARN", installRes.stderr || installRes.stdout);
+          }
+          await setProgress("install", "complete");
+        } catch (err) {
+          log("Step 6 — WARN", err instanceof Error ? err.message : String(err));
+          appendLog("Install skipped (non-fatal)");
+          await setProgress("install", "complete"); // non-fatal
+        }
+
+        // ── Create backup for next time ─────────────────────────────────
+        try {
+          const backup = await (sandbox as any).createBackup({
+            dir: "/workspace/repo",
+            name: `${owner}/${name}`,
+            ttl: 24 * 60 * 60,
+          });
+          if (backup?.id) {
+            await setRepoBackup(this.state.storage.sql, owner, name, backup.id);
+            appendLog(`Backup created (${backup.id.slice(0, 8)})`);
+            log("backup created", { sessionId, backupId: backup.id.slice(0, 8) });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log("backup creation failed (non-fatal)", { sessionId, error: msg });
+          appendLog(`Backup creation failed: ${msg}`);
+        }
       }
 
-      // ── Step 5: Run git log to prove it worked ──────────────────────
-      await setProgress("verify", "running", STEP_LABELS.verify);
-      appendLog("Verifying repository contents...");
-      log("Step 5 — git log");
-      let logRes: Awaited<ReturnType<typeof sandbox.exec>>;
-      try {
-        logRes = await sandbox.exec("cd /workspace/repo && git log --oneline -5");
-        const lines = logRes.stdout?.trim().split("\n").length ?? 0;
-        appendLog(`Verified ${lines} commits`);
-        log("Step 5 — result", { success: logRes.success, exitCode: logRes.exitCode, stdout: logRes.stdout });
-        if (!logRes.success) {
-          throw new Error(`git log failed: ${logRes.stderr || logRes.stdout}`);
-        }
-        await setProgress("verify", "complete");
-      } catch (err) {
-        log("Step 5 — FAIL", err instanceof Error ? err.message : String(err));
-        await setProgress("verify", "error", STEP_LABELS.verify, err instanceof Error ? err.message : String(err));
-        throw err;
-      }
-
-      // ── Step 6: Install KimiFlare globally ──────────────────────────
-      await setProgress("install", "running", STEP_LABELS.install);
-      appendLog("Running npm install -g kimiflare...");
-      log("Step 6 — npm install -g kimiflare");
-      try {
-        const installRes = await sandbox.exec("npm install -g kimiflare");
-        appendLog(installRes.success ? "KimiFlare installed successfully" : `Install warning (exit ${installRes.exitCode})`);
-        log("Step 6 — result", { success: installRes.success, exitCode: installRes.exitCode });
-        if (!installRes.success) {
-          log("Step 6 — WARN", installRes.stderr || installRes.stdout);
-        }
-        await setProgress("install", "complete");
-      } catch (err) {
-        log("Step 6 — WARN", err instanceof Error ? err.message : String(err));
-        appendLog("Install skipped (non-fatal)");
-        await setProgress("install", "complete"); // non-fatal
-      }
-
-      // ── Step 7: Write KimiFlare config with Cloudflare credentials ──
+      // ── Config write ALWAYS runs (credentials are per-session) ──────
       await setProgress("config", "running", STEP_LABELS.config);
       appendLog("Writing Cloudflare credentials to ~/.config/kimiflare/config.json...");
       log("Step 7 — write KimiFlare config");
@@ -373,8 +450,8 @@ export class SessionDO implements DurableObject {
       log("Step 8 — state stored", { sessionId, userId, hasArtifacts: !!sessionState.artifactsRepo });
       await setProgress("finalize", "complete", "Ready!");
 
-      log("handleSetup — SUCCESS", { sessionId, outputLines: logRes.stdout?.split("\n").length });
-      return Response.json({ success: true, output: logRes.stdout, sessionId });
+      log("handleSetup — SUCCESS", { sessionId, outputLines: logRes?.stdout?.split("\n").length });
+      return Response.json({ success: true, output: logRes?.stdout, sessionId });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log("handleSetup — UNCAUGHT ERROR", message);

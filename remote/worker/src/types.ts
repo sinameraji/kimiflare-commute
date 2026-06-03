@@ -36,6 +36,10 @@ export interface Env {
 
   // Multi-agent worker endpoint auth
   WORKER_API_KEY?: string;
+
+  // Hard ceiling for worker budget in USD (default: 5.0). Any client-sent
+  // budget.maxCostUsd above this is silently capped server-side.
+  WORKER_BUDGET_MAX_USD?: string;
 }
 
 export interface SessionState {
